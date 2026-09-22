@@ -307,6 +307,10 @@ class TypelessInputMethodService : InputMethodService() {
                         return true
                     }
 
+                    // 提前非同步預熱連線池，立省說完後的 TLS 握手延遲
+                    groqClient.prewarmConnection()
+                    geminiClient.prewarmConnection()
+
                     triggerHapticFeedback(45)
 
                     PermissionActivity.requestRecordAudio(this) { granted ->
@@ -446,6 +450,16 @@ class TypelessInputMethodService : InputMethodService() {
 
         Log.i(TAG, "===> [Stage 1 STT Raw]: \"$rawText\"")
 
+        // 速度最佳化：極短確認語快篩跳過機制（Fast-Path Skip）
+        // 針對 1~4 字以內之常見確認語（如「好」、「沒問題」、「收到」、「謝謝」等），直接本機出字，免去 500ms+ 的雲端 Gemini 往返
+        if (isFastPathCandidate(rawText!!)) {
+            val localCleaned = cleanFillerWordsLocally(rawText!!)
+            val formatted = applyPanguSpacing(localCleaned)
+            Log.i(TAG, "===> [Fast-Path Direct]: \"$formatted\"")
+            onProcessingSuccess("⚡ 極速直出 (Fast-Path)", formatted)
+            return
+        }
+
         // 階段 2：Gemini 純文字潤飾
         if (settingsManager.hasApiKey) {
             updateStatusOnMain("🤖 Gemini 潤飾中...")
@@ -475,6 +489,27 @@ class TypelessInputMethodService : InputMethodService() {
         return cleaned
     }
 
+    /**
+     * 判斷是否符合極短確認語快篩條件（日常高頻 1~4 字無歧義詞彙）
+     */
+    private fun isFastPathCandidate(text: String): Boolean {
+        val trimmed = text.trim()
+        val fastRegex = Regex("^(好|好的|好啊|可以|沒問題|没问题|收到|謝謝|谢谢|對|对|OK|ok|yes|Yes|好沒問題|好的謝謝|收到謝謝)[，,。！？!~]*$")
+        return fastRegex.matches(trimmed)
+    }
+
+    /**
+     * 盤古之白（Pangu Spacing）：在中文與英文/數字交界處自動插入最適間隔
+     */
+    private fun applyPanguSpacing(text: String): String {
+        var result = text
+        // 中文接英數
+        result = result.replace(Regex("([\\u4e00-\\u9fa5])([a-zA-Z0-9])"), "$1 $2")
+        // 英數接中文
+        result = result.replace(Regex("([a-zA-Z0-9])([\\u4e00-\\u9fa5])"), "$1 $2")
+        return result.trim()
+    }
+
     private fun updateStatusOnMain(status: String) {
         mainHandler.post {
             tvStatus?.text = status
@@ -485,8 +520,9 @@ class TypelessInputMethodService : InputMethodService() {
         mainHandler.post {
             resetRecordButtonUi()
             if (text.isNotBlank()) {
+                val formatted = applyPanguSpacing(text)
                 tvStatus?.text = sourceStatus
-                injectText(text)
+                injectText(formatted)
                 triggerHapticFeedback(100)
             } else {
                 tvStatus?.text = "未辨識出有效文字"

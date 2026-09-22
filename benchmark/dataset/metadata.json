@@ -1,0 +1,62 @@
+{
+  "description": "MyTypeless Pipeline Benchmark Test Cases",
+  "version": "1.0",
+  "test_cases": [
+    {
+      "id": "case_short_01",
+      "category": "極短確認語 (Short Confirmation)",
+      "raw_stt": "好沒問題",
+      "expected_output": "好，沒問題",
+      "fast_path_eligible": true,
+      "key_terms": []
+    },
+    {
+      "id": "case_short_02",
+      "category": "極短確認語 (Short Confirmation)",
+      "raw_stt": "收到謝謝",
+      "expected_output": "收到謝謝",
+      "fast_path_eligible": true,
+      "key_terms": []
+    },
+    {
+      "id": "case_tech_01",
+      "category": "技術中英混雜 (Tech Code-Switching)",
+      "raw_stt": "明天早上 meeting 要記得 review PR 然後 deploy 到 production",
+      "expected_output": "明天早上 meeting 要記得 review PR，然後 deploy 到 production。",
+      "fast_path_eligible": false,
+      "key_terms": ["meeting", "review", "PR", "deploy", "production"]
+    },
+    {
+      "id": "case_tech_02",
+      "category": "技術中英混雜 (Tech Code-Switching)",
+      "raw_stt": "這個 bug 已經 fix 了 請幫我 check 一下 branch 然後 merge",
+      "expected_output": "這個 bug 已經 fix 了，請幫我 check 一下 branch，然後 merge。",
+      "fast_path_eligible": false,
+      "key_terms": ["bug", "fix", "check", "branch", "merge"]
+    },
+    {
+      "id": "case_daily_01",
+      "category": "日常生活混用 (Daily Code-Switching)",
+      "raw_stt": "這週末要不要去吃個 brunch 順便 chill 一下",
+      "expected_output": "這週末要不要去吃個 brunch，順便 chill 一下。",
+      "fast_path_eligible": false,
+      "key_terms": ["brunch", "chill"]
+    },
+    {
+      "id": "case_fillers_01",
+      "category": "贅字過濾與繁體 (Fillers & Traditional Chinese)",
+      "raw_stt": "那個 呃 就是說 其實我覺得 這個架構方向可以再調整一下",
+      "expected_output": "其實我覺得這個架構方向可以再調整一下。",
+      "fast_path_eligible": false,
+      "key_terms": []
+    },
+    {
+      "id": "case_pure_en_01",
+      "category": "純英文情境 (Pure English)",
+      "raw_stt": "Please ping me when you are ready for the call",
+      "expected_output": "Please ping me when you are ready for the call.",
+      "fast_path_eligible": false,
+      "key_terms": ["ping", "ready", "call"]
+    }
+  ]
+}

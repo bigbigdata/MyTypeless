@@ -12,6 +12,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 
 /**
  * GeminiAudioClient
@@ -33,8 +34,8 @@ class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
 
 1. 【繁體中文規範】：所有中文輸出必須一律強制使用「繁體中文（正體中文，台灣習慣）」，絕對嚴禁輸出任何簡體中文！
 2. 【文字鏡像原則（Immutable Tokens，絕對禁止翻譯）】：
-   - 輸入中出現的任何英文字元（包含日常單字、名詞、動詞、形容詞、品牌名稱、片語或專業術語），其原始英文單字一律視為「不可變更的固定記號」。
-   - 說中文就輸出中文，說英文就輸出英文。絕對嚴禁將任何英文單字或片語意譯或翻譯為中文同義詞！必須原汁原味精確保留原文與慣用大小寫（例如 brunch, chill, meeting, PR, deploy, sync 絕對不能翻成早午餐、放鬆、會議、公關、部署、同步）。
+   - 輸入中出現的任何英文字元（包含日常單字、名詞、動詞、形容詞、品牌名稱、片語如 PR, deploy, meeting, sync, check, brunch, chill 等）一律視為「不可變更的固定記號」。
+   - 說中文就輸出中文，說英文就輸出英文。絕對嚴禁將任何英文單字或片語意譯或翻譯為中文同義詞！必須原汁原味精確保留原文與慣用大小寫。
 3. 【語篇結構分段門檻（自然流暢，嚴禁切碎）】：
    - 【預設行文連貫】：正常的一句話或口語連接（包含「還有」、「不過」、「但是」、「而且」等），一律以正常標點符號連接為自然段落，絕對禁止看到連接詞就強行換行！
    - 【顯式序列條列】：僅當口述包含明確的序列詞（例如「第一、... 第二、...」、「1. ... 2. ...」）或條列清單時，才換行整理成清晰的條列格式。
@@ -43,9 +44,16 @@ class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
 4. 【去除贅字口語】：
    - 僅去除口語贅字與停頓填補詞（例如：呃、啊、那個、就是說、然後其實、嗯等）。
    - 修順句子文法，適當補上正確繁體標點符號（，、。！？）。
-5. 【絕對禁止意譯】：
+5. 【示範範例 (Few-Shot Examples)】：
+   - 輸入：那個明天早上 meeting 要記得 review PR 然後 deploy 到 production
+     輸出：明天早上 meeting 要記得 review PR，然後 deploy 到 production。
+   - 輸入：這週末要不要去吃個 brunch 順便 chill 一下
+     輸出：這週末要不要去吃個 brunch，順便 chill 一下。
+   - 輸入：呃 就是說 其實我覺得 這個方向可以再調整一下
+     輸出：其實我覺得這個方向可以再調整一下。
+6. 【絕對禁止意譯】：
    - 不要用你自己的方式重新表達整句話的意思！這不是總結，保留使用者的原話語意與口氣。
-6. 【輸出格式】：
+7. 【輸出格式】：
    - 僅直接輸出潤飾與排版後的純文字內容。
    - 嚴禁包含任何引號、問候語、Markdown 程式碼區塊標記（```）或多餘解釋。"""
     }
@@ -55,6 +63,23 @@ class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
         .writeTimeout(35, TimeUnit.SECONDS)
         .readTimeout(35, TimeUnit.SECONDS)
         .build()
+
+    /**
+     * 連線池非同步預熱（在使用者按下說話鍵時觸發）
+     */
+    fun prewarmConnection() {
+        val apiKey = apiKeyProvider() ?: return
+        thread(start = true, name = "GeminiPrewarmThread") {
+            try {
+                val url = "https://generativelanguage.googleapis.com/v1beta/models?key=$apiKey"
+                val req = Request.Builder().url(url).head().build()
+                client.newCall(req).execute().close()
+                Log.d(TAG, "Gemini 連線池預熱完成")
+            } catch (_: Exception) {
+                // 預熱失敗不影響後續正式調用
+            }
+        }
+    }
 
     /**
      * 【純文字潤飾模式】（推薦主力）

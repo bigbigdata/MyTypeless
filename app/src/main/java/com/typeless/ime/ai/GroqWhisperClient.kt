@@ -10,6 +10,7 @@ import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 
 /**
  * GroqWhisperClient
@@ -23,7 +24,7 @@ class GroqWhisperClient(private val apiKeyProvider: () -> String?) {
         private const val TAG = "GroqWhisperClient"
         private const val GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
         private const val MODEL_NAME = "whisper-large-v3-turbo"
-        private const val WHISPER_PROMPT = "這是一段日常生活與對話的繁體中文語音，內容自然夾雜一些常見的 English words、品牌名稱與專有名詞。"
+        private const val WHISPER_PROMPT = "這是一段日常生活與工作的繁體中文語音，自然夾雜常見的英文單字與專有名詞，例如：PR, deploy, meeting, sync, check, chill, brunch, bug, commit, branch, merge, feature, API, SDK, PM, UI, UX, issue, release, test, Wi-Fi, Google, GitHub, Notion, Slack。"
     }
 
     private val client = OkHttpClient.Builder()
@@ -31,6 +32,27 @@ class GroqWhisperClient(private val apiKeyProvider: () -> String?) {
         .writeTimeout(35, TimeUnit.SECONDS)
         .readTimeout(35, TimeUnit.SECONDS)
         .build()
+
+    /**
+     * 連線池非同步預熱（在使用者按下說話鍵時觸發）
+     * 提前建立 TLS 1.3 會話，放開說話送出時立省 150~250ms 握手時延
+     */
+    fun prewarmConnection() {
+        val apiKey = apiKeyProvider() ?: return
+        thread(start = true, name = "GroqPrewarmThread") {
+            try {
+                val req = Request.Builder()
+                    .url(GROQ_URL)
+                    .header("Authorization", "Bearer $apiKey")
+                    .head()
+                    .build()
+                client.newCall(req).execute().close()
+                Log.d(TAG, "Groq 連線池預熱完成")
+            } catch (_: Exception) {
+                // 預熱失敗不影響後續正式調用
+            }
+        }
+    }
 
     /**
      * 將語音檔案轉錄為原始文字（支援 M4A/AAC 與 WAV）
