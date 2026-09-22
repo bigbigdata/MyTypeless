@@ -12,12 +12,12 @@ import androidx.core.content.ContextCompat
 /**
  * PermissionActivity
  * 
- * 透明中介 Activity（Trampoline Activity）。
- * 由於 Android 系統限制，InputMethodService 是特殊系統服務，
- * 無法直接彈出 ActivityCompat.requestPermissions 授權視窗。
+ * Transparent trampoline activity.
+ * Due to Android framework constraints, an InputMethodService is a background system service
+ * and cannot directly invoke ActivityCompat.requestPermissions dialogs.
  * 
- * 本 Activity 會以全透明無動畫的方式在前景閃現，跳出系統麥克風授權框，
- * 待使用者點選「允許」或「拒絕」後，透過回呼通知輸入法並立即關閉自己。
+ * This activity launches invisibly in the foreground without animations, requests microphone permission,
+ * dispatches the result callback to the IME service, and immediately finishes itself.
  */
 class PermissionActivity : AppCompatActivity() {
 
@@ -26,7 +26,7 @@ class PermissionActivity : AppCompatActivity() {
         private var onPermissionResultCallback: ((Boolean) -> Unit)? = null
 
         /**
-         * 從輸入法或任何 Context 啟動授權請求
+         * Initiates microphone permission request from the IME or any Context.
          */
         fun requestRecordAudio(context: Context, onResult: (Boolean) -> Unit) {
             if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
@@ -44,7 +44,7 @@ class PermissionActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // 移除進入動畫
+        // Disable window enter animation
         overridePendingTransition(0, 0)
 
         val isGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED

@@ -11,7 +11,7 @@ import com.google.android.material.textfield.TextInputEditText
 /**
  * SettingsActivity
  * 
- * 讓使用者在手機介面上設定/更新 Groq 與 Gemini API Key。
+ * Allows users to configure and update their Groq and Gemini API keys.
  */
 class SettingsActivity : AppCompatActivity() {
 
@@ -29,17 +29,17 @@ class SettingsActivity : AppCompatActivity() {
         val btnGetGeminiKey = findViewById<Button>(R.id.btn_get_gemini_key)
         val btnSave = findViewById<Button>(R.id.btn_save)
 
-        // 載入已儲存的金鑰
+        // Load saved API keys
         settingsManager.groqApiKey?.let { etGroqApiKey.setText(it) }
         settingsManager.apiKey?.let { etApiKey.setText(it) }
 
-        // 點擊前往申請 Groq Key
+        // Open browser to obtain Groq API Key
         btnGetGroqKey.setOnClickListener {
             val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://console.groq.com/keys"))
             startActivity(intent)
         }
 
-        // 點擊前往申請 Gemini Key
+        // Open browser to obtain Gemini API Key
         btnGetGeminiKey.setOnClickListener {
             val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/app/apikey"))
             startActivity(intent)

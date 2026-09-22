@@ -15,8 +15,8 @@ import kotlin.concurrent.thread
 /**
  * GroqWhisperClient
  * 
- * 負責將錄製的語音檔案（WAV/AAC）發送給 Groq Whisper API 進行極速語音轉文字（STT）。
- * 模型採用 whisper-large-v3-turbo，支援中英混雜與專有名詞精準轉錄。
+ * Sends recorded audio files (WAV/AAC) to the Groq Whisper API for ultra-fast Speech-to-Text (STT).
+ * Powered by whisper-large-v3-turbo, supporting accurate code-switching and technical terminology.
  */
 class GroqWhisperClient(private val apiKeyProvider: () -> String?) {
 
@@ -34,8 +34,8 @@ class GroqWhisperClient(private val apiKeyProvider: () -> String?) {
         .build()
 
     /**
-     * 連線池非同步預熱（在使用者按下說話鍵時觸發）
-     * 提前建立 TLS 1.3 會話，放開說話送出時立省 150~250ms 握手時延
+     * Asynchronously pre-warms the connection pool when the user starts speaking.
+     * Establishes a TLS session in advance to eliminate 150-250ms of handshake latency upon release.
      */
     fun prewarmConnection() {
         val apiKey = apiKeyProvider() ?: return
@@ -47,24 +47,24 @@ class GroqWhisperClient(private val apiKeyProvider: () -> String?) {
                     .head()
                     .build()
                 client.newCall(req).execute().close()
-                Log.d(TAG, "Groq 連線池預熱完成")
+                Log.d(TAG, "Groq connection pool pre-warmed successfully")
             } catch (_: Exception) {
-                // 預熱失敗不影響後續正式調用
+                // Pre-warming failure is non-fatal; regular calls will establish connection as normal
             }
         }
     }
 
     /**
-     * 將語音檔案轉錄為原始文字（支援 M4A/AAC 與 WAV）
+     * Transcribes an audio file into raw text (supports M4A/AAC and WAV).
      */
     fun transcribe(audioFile: File): Result<String> {
         val apiKey = apiKeyProvider()
         if (apiKey.isNullOrBlank()) {
-            return Result.failure(IllegalStateException("尚未設定 Groq API Key"))
+            return Result.failure(IllegalStateException("Groq API Key is not configured"))
         }
 
         if (!audioFile.exists() || audioFile.length() <= 100) {
-            return Result.failure(IllegalArgumentException("音訊檔案為空或錄音時間過短"))
+            return Result.failure(IllegalArgumentException("Audio file is empty or recording duration was too short"))
         }
 
         return try {
@@ -100,17 +100,17 @@ class GroqWhisperClient(private val apiKeyProvider: () -> String?) {
                     } catch (_: Exception) {
                         body
                     }
-                    Log.e(TAG, "Groq STT 失敗 (HTTP ${response.code}): $errMsg")
+                    Log.e(TAG, "Groq STT failed (HTTP ${response.code}): $errMsg")
                     return Result.failure(IOException("Groq HTTP ${response.code}: $errMsg"))
                 }
 
                 val json = JSONObject(body)
                 val text = json.optString("text", "").trim()
-                Log.i(TAG, "Groq STT 成功轉錄: $text")
+                Log.i(TAG, "Groq STT transcribed successfully: $text")
                 Result.success(text)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Groq STT 網路或解析異常", e)
+            Log.e(TAG, "Groq STT network or parsing exception", e)
             Result.failure(e)
         }
     }

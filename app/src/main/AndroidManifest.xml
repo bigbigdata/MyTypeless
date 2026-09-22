@@ -15,7 +15,7 @@
         android:theme="@style/Theme.MaterialComponents.DayNight.NoActionBar">
 
 
-        <!-- 透明中介 Activity：專門用於觸發系統錄音授權彈窗 -->
+        <!-- Transparent proxy Activity: Triggers system audio recording permission dialog -->
         <activity
             android:name=".PermissionActivity"
             android:exported="false"
@@ -23,7 +23,7 @@
             android:launchMode="singleTop"
             android:excludeFromRecents="true" />
 
-        <!-- 設定畫面：支援桌面圖示開啟以設定 API Key -->
+        <!-- Settings Screen: Accessible via launcher icon to configure API keys -->
         <activity
             android:name=".SettingsActivity"
             android:label="MyTypeless 設定"

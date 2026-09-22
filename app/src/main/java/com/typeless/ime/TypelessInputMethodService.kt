@@ -32,12 +32,12 @@ import kotlin.concurrent.thread
 /**
  * TypelessInputMethodService (MyTypeless)
  * 
- * 核心語音輸入法服務：
- * 1. 雙階段管線：Groq Whisper 極速 STT + Gemini 純文字繁體去贅字。
- * 2. 來源透明可視化：狀態列即時標記 ⚡ Groq / 🤖 Gemini / 本機保底。
- * 3. 健全的硬體資源防護：支援 60s 上限、鍵盤收起自動切斷釋放。
- * 4. 具備原生 Backspace 刪除鍵（單擊刪除、長按連續退格）。
- * 5. 具備情境感知動作/送出鍵（依據焦點自動呈現 🔍 / 送出 / 前往 / ➜ / ✓ / ↵）。
+ * Core voice input method service:
+ * 1. Two-stage pipeline: Groq Whisper ultra-fast STT + Gemini text polish and filler removal.
+ * 2. Transparent source indication: Real-time status badge showing Groq, Gemini, or local fallback.
+ * 3. Robust hardware lifecycle protection: Audio session termination on keyboard hide.
+ * 4. Native backspace key (single tap delete, long-press continuous backspace).
+ * 5. Context-aware action/enter key (dynamically displays Search, Send, Go, Next, Done, or Newline based on EditorInfo).
  */
 class TypelessInputMethodService : InputMethodService() {
 
@@ -94,17 +94,17 @@ class TypelessInputMethodService : InputMethodService() {
 
         updateStatusPrompt()
 
-        // 綁定送出／執行按鍵點擊
+        // Bind action / enter button click
         btnAction?.setOnClickListener {
             handleActionButton()
         }
 
-        // 綁定錄音按鈕觸控手勢
+        // Bind voice recording touch gestures
         btnRecord?.setOnTouchListener { _, event ->
             handleRecordTouch(event)
         }
 
-        // 綁定退格刪除鍵（單擊刪除、長按連續退格）
+        // Bind backspace key (single-tap delete, long-press continuous backspace)
         btnDelete?.setOnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
@@ -121,13 +121,13 @@ class TypelessInputMethodService : InputMethodService() {
             }
         }
 
-        // 開啟設定畫面
+        // Open settings activity
         val btnSettings = view.findViewById<Button>(R.id.btn_settings)
         btnSettings?.setOnClickListener {
             openSettingsActivity()
         }
 
-        // 切換回系統其他輸入法按鈕
+        // Switch to other system keyboards
         val btnSwitch = view.findViewById<Button>(R.id.btn_switch_keyboard)
         btnSwitch?.setOnClickListener {
             val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
@@ -182,7 +182,7 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     /**
-     * 處理刪除按鍵邏輯
+     * Handles backspace delete logic.
      */
     private fun handleDeleteSurroundingText() {
         val ic = currentInputConnection ?: return
@@ -195,7 +195,7 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     /**
-     * 依據焦點輸入框之 EditorInfo 動態設定送出／執行按鍵圖示、文字與顏色
+     * Dynamically configures the action button icon, label, and style based on EditorInfo.
      */
     private fun updateActionButtonState(info: EditorInfo?) {
         val btn = btnAction ?: return
@@ -206,7 +206,7 @@ class TypelessInputMethodService : InputMethodService() {
             return
         }
 
-        // 若有指定的 actionLabel，優先使用
+        // Prioritize custom actionLabel if provided by the target editor
         if (!info.actionLabel.isNullOrEmpty()) {
             btn.text = info.actionLabel.toString()
             btn.contentDescription = info.actionLabel.toString()
@@ -218,7 +218,7 @@ class TypelessInputMethodService : InputMethodService() {
         val action = info.imeOptions and EditorInfo.IME_MASK_ACTION
         val noEnter = (info.imeOptions and EditorInfo.IME_FLAG_NO_ENTER_ACTION) != 0
 
-        // 判斷是否應顯示動作型按鈕（搜尋、送出、前往、下一步、完成）
+        // Determine whether to display an active action button (Search, Send, Go, Next, Done)
         if (!noEnter && action != EditorInfo.IME_ACTION_UNSPECIFIED && action != EditorInfo.IME_ACTION_NONE) {
             btn.backgroundTintList = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.ime_action_active))
             when (action) {
@@ -254,7 +254,7 @@ class TypelessInputMethodService : InputMethodService() {
                 }
             }
         } else {
-            // 多行編輯或一般換行
+            // Multiline editor or default enter
             btn.text = getString(R.string.action_enter)
             btn.contentDescription = getString(R.string.desc_action_enter)
             btn.textSize = 20f
@@ -263,7 +263,7 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     /**
-     * 處理送出／執行／確認按鍵點擊事件
+     * Handles action / enter button click events.
      */
     private fun handleActionButton() {
         triggerHapticFeedback(30)
@@ -271,13 +271,13 @@ class TypelessInputMethodService : InputMethodService() {
         val info = currentInputEditorInfo ?: lastEditorInfo
 
         if (info != null) {
-            // 1. 若應用程式指定了自訂 actionId
+            // 1. If target application specifies a custom actionId
             if (info.actionId != 0) {
                 ic.performEditorAction(info.actionId)
                 return
             }
 
-            // 2. 若為特定 IME 動作
+            // 2. If valid standard IME action
             val action = info.imeOptions and EditorInfo.IME_MASK_ACTION
             val noEnter = (info.imeOptions and EditorInfo.IME_FLAG_NO_ENTER_ACTION) != 0
 
@@ -287,12 +287,12 @@ class TypelessInputMethodService : InputMethodService() {
             }
         }
 
-        // 3. 多行換行或一般 Enter 鍵
+        // 3. Multiline newline or standard Enter key event
         sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER)
     }
 
     /**
-     * 處理錄音手勢（長按對講 / 短按開關）
+     * Handles recording touch gestures (hold to talk / tap to toggle).
      */
     private fun handleRecordTouch(event: MotionEvent): Boolean {
         when (event.action) {
@@ -307,7 +307,7 @@ class TypelessInputMethodService : InputMethodService() {
                         return true
                     }
 
-                    // 提前非同步預熱連線池，立省說完後的 TLS 握手延遲
+                    // Pre-warm connection pool asynchronously to eliminate TLS handshake latency
                     groqClient.prewarmConnection()
                     geminiClient.prewarmConnection()
 
@@ -397,7 +397,7 @@ class TypelessInputMethodService : InputMethodService() {
             return
         }
 
-        // 進入 AI 處理狀態
+        // Transition to AI processing state
         btnRecord?.isEnabled = false
         btnRecord?.text = "⏳ 處理中..."
         btnRecord?.backgroundTintList = ColorStateList.valueOf(
@@ -410,12 +410,14 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     /**
-     * 雙階段管線處理邏輯
+     * Two-stage pipeline processing logic:
+     * Stage 1: Audio STT (Groq Whisper / Gemini Audio direct fallback)
+     * Stage 2: Text Polishing (Gemini LLM / Local Fast-Path filter)
      */
     private fun processAudioPipeline(audioFile: File) {
         var rawText: String? = null
 
-        // 階段 1：語音轉文字 (STT)
+        // Stage 1: Speech-to-Text (STT) via Groq Whisper
         if (settingsManager.hasGroqApiKey) {
             updateStatusOnMain("⚡ Groq 轉錄中...")
             val groqResult = groqClient.transcribe(audioFile)
@@ -424,11 +426,11 @@ class TypelessInputMethodService : InputMethodService() {
                     rawText = text
                 }
             }.onFailure { err ->
-                Log.w(TAG, "Groq 轉錄失敗: ${err.message}")
+                Log.w(TAG, "Groq transcription failed: ${err.message}")
             }
         }
 
-        // 若無 Groq Key 或 Groq 失敗，且有 Gemini Key，嘗試 Gemini 多模態直傳作為相容備援
+        // Fallback: If no Groq Key is available or Groq STT fails, try direct Gemini multimodal transcription if Gemini Key is configured
         if (rawText.isNullOrBlank() && settingsManager.hasApiKey) {
             updateStatusOnMain("🤖 Gemini 直傳辨識中...")
             val directResult = geminiClient.transcribeAndPolish(audioFile, settingsManager.model)
@@ -437,7 +439,7 @@ class TypelessInputMethodService : InputMethodService() {
                 onProcessingSuccess("🤖 Gemini 直傳完成", polished)
                 return
             }.onFailure { err ->
-                Log.w(TAG, "Gemini 音訊直傳失敗: ${err.message}")
+                Log.w(TAG, "Gemini direct audio transcription failed: ${err.message}")
             }
         }
 
@@ -450,8 +452,9 @@ class TypelessInputMethodService : InputMethodService() {
 
         Log.i(TAG, "===> [Stage 1 STT Raw]: \"$rawText\"")
 
-        // 速度最佳化：極短確認語快篩跳過機制（Fast-Path Skip）
-        // 針對 1~4 字以內之常見確認語（如「好」、「沒問題」、「收到」、「謝謝」等），直接本機出字，免去 500ms+ 的雲端 Gemini 往返
+        // Latency optimization: Fast-Path Skip for ultra-short affirmations.
+        // For common 1-4 character affirmations (e.g., "OK", "Sure", "Thanks", "No problem"),
+        // inject text directly locally to save 500ms+ cloud Gemini round-trip latency.
         if (isFastPathCandidate(rawText!!)) {
             val localCleaned = cleanFillerWordsLocally(rawText!!)
             val formatted = applyPanguSpacing(localCleaned)
@@ -460,7 +463,7 @@ class TypelessInputMethodService : InputMethodService() {
             return
         }
 
-        // 階段 2：Gemini 純文字潤飾
+        // Stage 2: Gemini text polishing and structuring
         if (settingsManager.hasApiKey) {
             updateStatusOnMain("🤖 Gemini 潤飾中...")
             val polishResult = geminiClient.polishText(rawText!!, settingsManager.model)
@@ -469,13 +472,13 @@ class TypelessInputMethodService : InputMethodService() {
                 Log.i(TAG, "===> [Stage 2 Gemini Polished]: \"$textToInject\"")
                 onProcessingSuccess("⚡ Groq + 🤖 Gemini 潤飾完成", textToInject)
             }.onFailure { err ->
-                Log.w(TAG, "Gemini 潤飾失敗或冷卻 (429)，改用本機保底出字: ${err.message}")
+                Log.w(TAG, "Gemini polishing failed or rate limited (429), falling back to local output: ${err.message}")
                 val localCleaned = cleanFillerWordsLocally(rawText!!)
                 Log.i(TAG, "===> [Stage 2 Local Fallback]: \"$localCleaned\"")
                 onProcessingSuccess("⚡ Groq 直出（AI 冷卻中）", localCleaned)
             }
         } else {
-            // 沒有設定 Gemini Key，直接本機過濾出字
+            // If no Gemini API key is configured, perform local filtering and output directly
             val localCleaned = cleanFillerWordsLocally(rawText!!)
             Log.i(TAG, "===> [Stage 2 Direct]: \"$localCleaned\"")
             onProcessingSuccess("⚡ Groq 直出", localCleaned)
@@ -490,7 +493,8 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     /**
-     * 判斷是否符合極短確認語快篩條件（日常高頻 1~4 字無歧義詞彙）
+     * Determines if the transcribed text qualifies for Fast-Path bypass
+     * (high-frequency, unambiguous 1-4 character affirmations).
      */
     private fun isFastPathCandidate(text: String): Boolean {
         val trimmed = text.trim()
@@ -499,13 +503,13 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     /**
-     * 盤古之白（Pangu Spacing）：在中文與英文/數字交界處自動插入最適間隔
+     * Pangu Spacing: Automatically inserts appropriate spacing between CJK and Western/numeric characters.
      */
     private fun applyPanguSpacing(text: String): String {
         var result = text
-        // 中文接英數
+        // CJK followed by alphanumeric
         result = result.replace(Regex("([\\u4e00-\\u9fa5])([a-zA-Z0-9])"), "$1 $2")
-        // 英數接中文
+        // Alphanumeric followed by CJK
         result = result.replace(Regex("([a-zA-Z0-9])([\\u4e00-\\u9fa5])"), "$1 $2")
         return result.trim()
     }

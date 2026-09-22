@@ -6,8 +6,8 @@ import android.content.SharedPreferences
 /**
  * SettingsManager
  * 
- * 負責管理輸入法的偏好設定，包括 Gemini API Key 與模型選擇。
- * 存儲於 Android 原生 SharedPreferences。
+ * Manages user preferences for the input method, including Groq/Gemini API keys and model selection.
+ * Persisted in Android SharedPreferences.
  */
 class SettingsManager(context: Context) {
 

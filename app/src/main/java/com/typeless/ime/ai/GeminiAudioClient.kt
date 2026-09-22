@@ -17,11 +17,11 @@ import kotlin.concurrent.thread
 /**
  * GeminiAudioClient
  * 
- * 負責呼叫 Google Gemini API：
- * 1. [polishText]：純文字智慧去贅字潤飾（核心模式，極省 Token、極速）。
- * 2. [transcribeAndPolish]：多模態音訊直傳潤飾（相容備用）。
+ * Handles calls to the Google Gemini API:
+ * 1. [polishText]: Pure-text intelligent filler removal and grammar polish (primary recommended mode, token-efficient and fast).
+ * 2. [transcribeAndPolish]: Multimodal direct audio transcription and polish (fallback mode).
  * 
- * 徹底拔除無效的 ListModels 與連環暴擊重試，遇 429 立即終止以保護配額。
+ * Eliminates redundant ListModels queries and aggressive retry loops, terminating immediately on 429 to safeguard quota.
  */
 class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
 
@@ -65,7 +65,7 @@ class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
         .build()
 
     /**
-     * 連線池非同步預熱（在使用者按下說話鍵時觸發）
+     * Asynchronously pre-warms the connection pool when the user starts speaking.
      */
     fun prewarmConnection() {
         val apiKey = apiKeyProvider() ?: return
@@ -74,21 +74,21 @@ class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
                 val url = "https://generativelanguage.googleapis.com/v1beta/models?key=$apiKey"
                 val req = Request.Builder().url(url).head().build()
                 client.newCall(req).execute().close()
-                Log.d(TAG, "Gemini 連線池預熱完成")
+                Log.d(TAG, "Gemini connection pool pre-warmed successfully")
             } catch (_: Exception) {
-                // 預熱失敗不影響後續正式調用
+                // Pre-warming failure is non-fatal
             }
         }
     }
 
     /**
-     * 【純文字潤飾模式】（推薦主力）
-     * 將 Groq 或本機 STT 轉出的原始逐字稿丟給 Gemini 去贅字
+     * [Text Polish Mode] (Primary recommended mode)
+     * Passes the raw transcript from Groq or local STT to Gemini for filler word removal and grammar polish.
      */
     fun polishText(rawText: String, preferredModel: String? = null): Result<String> {
         val apiKey = apiKeyProvider()
         if (apiKey.isNullOrBlank()) {
-            return Result.failure(IllegalStateException("尚未設定 Gemini API Key"))
+            return Result.failure(IllegalStateException("Gemini API Key is not configured"))
         }
 
         if (rawText.isBlank()) {
@@ -102,25 +102,25 @@ class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
             val polished = executeCallWithRetry(targetModel, apiKey, jsonPayload)
             Result.success(polished)
         } catch (e: RateLimitException) {
-            Log.w(TAG, "Gemini 配額已滿 (HTTP 429)，立即終止調用以保護配額: ${e.message}")
+            Log.w(TAG, "Gemini quota exceeded (HTTP 429), aborting call to protect quota: ${e.message}")
             Result.failure(e)
         } catch (e: Exception) {
-            Log.e(TAG, "Gemini 文字潤飾異常", e)
+            Log.e(TAG, "Gemini text polishing exception", e)
             Result.failure(e)
         }
     }
 
     /**
-     * 【多模態音訊直傳模式】（相容備用）
+     * [Multimodal Direct Audio Mode] (Fallback mode)
      */
     fun transcribeAndPolish(audioFile: File, preferredModel: String? = null): Result<String> {
         val apiKey = apiKeyProvider()
         if (apiKey.isNullOrBlank()) {
-            return Result.failure(IllegalStateException("尚未設定 Gemini API Key"))
+            return Result.failure(IllegalStateException("Gemini API Key is not configured"))
         }
 
         if (!audioFile.exists() || audioFile.length() <= 44) {
-            return Result.failure(IllegalArgumentException("音訊檔案為空或說話時間過短"))
+            return Result.failure(IllegalArgumentException("Audio file is empty or recording duration was too short"))
         }
 
         val targetModel = preferredModel?.takeIf { it.isNotBlank() } ?: DEFAULT_MODEL
@@ -131,10 +131,10 @@ class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
             val polished = executeCallWithRetry(targetModel, apiKey, jsonPayload)
             Result.success(polished)
         } catch (e: RateLimitException) {
-            Log.w(TAG, "Gemini 配額已滿 (HTTP 429)，立即終止以保護配額: ${e.message}")
+            Log.w(TAG, "Gemini quota exceeded (HTTP 429), aborting call to protect quota: ${e.message}")
             Result.failure(e)
         } catch (e: Exception) {
-            Log.e(TAG, "Gemini 音訊直傳處理異常", e)
+            Log.e(TAG, "Gemini audio direct transcription exception", e)
             Result.failure(e)
         }
     }
@@ -143,7 +143,7 @@ class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
         try {
             return executeApiCall(model, apiKey, jsonPayload)
         } catch (e: ServerUnavailableException) {
-            Log.w(TAG, "Gemini 伺服器繁忙 (503)，等待 1 秒後進行唯一一次重試...")
+            Log.w(TAG, "Gemini server busy (503), waiting 1s before retrying once...")
             Thread.sleep(1000)
             return executeApiCall(model, apiKey, jsonPayload)
         }
@@ -181,14 +181,14 @@ class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
             val jsonResponse = JSONObject(responseBody)
             val candidates = jsonResponse.optJSONArray("candidates")
             if (candidates == null || candidates.length() == 0) {
-                throw IOException("API 未回傳文字候選結果: $responseBody")
+                throw IOException("API returned no candidate text: $responseBody")
             }
 
             val firstCandidate = candidates.getJSONObject(0)
             val content = firstCandidate.optJSONObject("content")
             val parts = content?.optJSONArray("parts")
             if (parts == null || parts.length() == 0) {
-                throw IOException("API 回傳內容空白")
+                throw IOException("API returned empty content")
             }
 
             val text = parts.getJSONObject(0).optString("text", "").trim()

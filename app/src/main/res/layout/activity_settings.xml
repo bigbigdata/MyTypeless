@@ -35,7 +35,7 @@
                 android:textColor="@color/ime_text_secondary"
                 android:textSize="14sp" />
 
-            <!-- 第一階段：Groq Whisper API Key -->
+            <!-- Stage 1: Groq Whisper API Key -->
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -81,7 +81,7 @@
                 android:textColor="@color/ime_text_secondary"
                 android:textSize="12sp" />
 
-            <!-- 第二階段：Gemini API Key -->
+            <!-- Stage 2: Gemini API Key -->
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 透明 Activity 主題：無標題、無邊框、完全透明、無視窗切換動畫 -->
+    <!-- Transparent Activity Theme: No title, borderless, fully transparent, no window animations -->
     <style name="Theme.Transparent" parent="Theme.MaterialComponents.DayNight.NoActionBar">
 
         <item name="android:windowIsTranslucent">true</item>
