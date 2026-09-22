@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ime_background">#1A1A1E</color>
+    <color name="ime_card">#26262B</color>
+    <color name="ime_primary">#6750A4</color>
+    <color name="ime_on_primary">#FFFFFF</color>
+    <color name="ime_recording">#E53935</color>
+    <color name="ime_recording_pulse">#FF8A80</color>
+    <color name="ime_text_primary">#F4F4F5</color>
+    <color name="ime_text_secondary">#A1A1AA</color>
+
+</resources>

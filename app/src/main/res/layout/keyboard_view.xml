@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@color/ime_background"
+    android:orientation="vertical"
+    android:paddingStart="16dp"
+    android:paddingTop="12dp"
+    android:paddingEnd="16dp"
+    android:paddingBottom="20dp">
+
+    <!-- Top Bar: App Title & Action Buttons -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/ime_banner_title"
+            android:textColor="@color/ime_text_primary"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/btn_settings"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:minWidth="0dp"
+            android:minHeight="36dp"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:text="⚙️ 設定"
+            android:textColor="@color/ime_text_secondary"
+            android:textSize="13sp" />
+
+        <Button
+            android:id="@+id/btn_switch_keyboard"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:minWidth="0dp"
+            android:minHeight="36dp"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:text="@string/btn_switch_keyboard"
+            android:textColor="@color/ime_text_secondary"
+            android:textSize="13sp" />
+    </LinearLayout>
+
+    <!-- Status text & Live amplitude bar -->
+    <TextView
+        android:id="@+id/tv_status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:layout_marginBottom="6dp"
+        android:gravity="center"
+        android:text="@string/status_idle"
+        android:textColor="@color/ime_text_secondary"
+        android:textSize="13sp" />
+
+    <ProgressBar
+        android:id="@+id/pb_audio_level"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="6dp"
+        android:layout_marginBottom="12dp"
+        android:max="100"
+        android:progress="0"
+        android:progressTint="@color/ime_recording_pulse"
+        android:visibility="invisible" />
+
+    <!-- Bottom Buttons: Main Voice Button + Ergonomic Backspace Delete Key -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btn_record"
+            style="@style/Widget.MaterialComponents.Button"
+            android:layout_width="0dp"
+            android:layout_height="64dp"
+            android:layout_weight="1"
+            android:backgroundTint="@color/ime_primary"
+            android:text="@string/btn_record_start"
+            android:textColor="@color/ime_on_primary"
+            android:textSize="17sp"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/btn_delete"
+            style="@style/Widget.MaterialComponents.Button"
+            android:layout_width="72dp"
+            android:layout_height="64dp"
+            android:layout_marginStart="10dp"
+            android:backgroundTint="@color/ime_card"
+            android:text="⌫"
+            android:textColor="@color/ime_text_primary"
+            android:textSize="22sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+
+</LinearLayout>
