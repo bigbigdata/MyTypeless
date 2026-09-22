@@ -8,5 +8,6 @@
     <color name="ime_recording_pulse">#FF8A80</color>
     <color name="ime_text_primary">#F4F4F5</color>
     <color name="ime_text_secondary">#A1A1AA</color>
+    <color name="ime_action_active">#7C4DFF</color>
 
 </resources>

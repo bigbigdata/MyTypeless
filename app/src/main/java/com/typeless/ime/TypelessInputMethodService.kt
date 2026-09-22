@@ -13,8 +13,10 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.Log
 import android.view.HapticFeedbackConstants
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
+import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.ProgressBar
@@ -35,6 +37,7 @@ import kotlin.concurrent.thread
  * 2. 來源透明可視化：狀態列即時標記 ⚡ Groq / 🤖 Gemini / 本機保底。
  * 3. 健全的硬體資源防護：支援 60s 上限、鍵盤收起自動切斷釋放。
  * 4. 具備原生 Backspace 刪除鍵（單擊刪除、長按連續退格）。
+ * 5. 具備情境感知動作/送出鍵（依據焦點自動呈現 🔍 / 送出 / 前往 / ➜ / ✓ / ↵）。
  */
 class TypelessInputMethodService : InputMethodService() {
 
@@ -55,6 +58,8 @@ class TypelessInputMethodService : InputMethodService() {
     private var pbAudioLevel: ProgressBar? = null
     private var btnRecord: Button? = null
     private var btnDelete: Button? = null
+    private var btnAction: Button? = null
+    private var lastEditorInfo: EditorInfo? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val deleteHandler = Handler(Looper.getMainLooper())
@@ -85,8 +90,14 @@ class TypelessInputMethodService : InputMethodService() {
         pbAudioLevel = view.findViewById(R.id.pb_audio_level)
         btnRecord = view.findViewById(R.id.btn_record)
         btnDelete = view.findViewById(R.id.btn_delete)
+        btnAction = view.findViewById(R.id.btn_action)
 
         updateStatusPrompt()
+
+        // 綁定送出／執行按鍵點擊
+        btnAction?.setOnClickListener {
+            handleActionButton()
+        }
 
         // 綁定錄音按鈕觸控手勢
         btnRecord?.setOnTouchListener { _, event ->
@@ -128,7 +139,9 @@ class TypelessInputMethodService : InputMethodService() {
 
     override fun onStartInputView(info: android.view.inputmethod.EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
+        lastEditorInfo = info
         updateStatusPrompt()
+        updateActionButtonState(info)
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
@@ -179,6 +192,103 @@ class TypelessInputMethodService : InputMethodService() {
         } else {
             ic.commitText("", 1)
         }
+    }
+
+    /**
+     * 依據焦點輸入框之 EditorInfo 動態設定送出／執行按鍵圖示、文字與顏色
+     */
+    private fun updateActionButtonState(info: EditorInfo?) {
+        val btn = btnAction ?: return
+        if (info == null) {
+            btn.text = getString(R.string.action_enter)
+            btn.contentDescription = getString(R.string.desc_action_enter)
+            btn.backgroundTintList = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.ime_card))
+            return
+        }
+
+        // 若有指定的 actionLabel，優先使用
+        if (!info.actionLabel.isNullOrEmpty()) {
+            btn.text = info.actionLabel.toString()
+            btn.contentDescription = info.actionLabel.toString()
+            btn.textSize = if (info.actionLabel.length > 2) 13f else 15f
+            btn.backgroundTintList = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.ime_action_active))
+            return
+        }
+
+        val action = info.imeOptions and EditorInfo.IME_MASK_ACTION
+        val noEnter = (info.imeOptions and EditorInfo.IME_FLAG_NO_ENTER_ACTION) != 0
+
+        // 判斷是否應顯示動作型按鈕（搜尋、送出、前往、下一步、完成）
+        if (!noEnter && action != EditorInfo.IME_ACTION_UNSPECIFIED && action != EditorInfo.IME_ACTION_NONE) {
+            btn.backgroundTintList = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.ime_action_active))
+            when (action) {
+                EditorInfo.IME_ACTION_SEARCH -> {
+                    btn.text = getString(R.string.action_search)
+                    btn.contentDescription = getString(R.string.desc_action_search)
+                    btn.textSize = 20f
+                }
+                EditorInfo.IME_ACTION_SEND -> {
+                    btn.text = getString(R.string.action_send)
+                    btn.contentDescription = getString(R.string.desc_action_send)
+                    btn.textSize = 15f
+                }
+                EditorInfo.IME_ACTION_GO -> {
+                    btn.text = getString(R.string.action_go)
+                    btn.contentDescription = getString(R.string.desc_action_go)
+                    btn.textSize = 15f
+                }
+                EditorInfo.IME_ACTION_NEXT -> {
+                    btn.text = getString(R.string.action_next)
+                    btn.contentDescription = getString(R.string.desc_action_next)
+                    btn.textSize = 18f
+                }
+                EditorInfo.IME_ACTION_DONE -> {
+                    btn.text = getString(R.string.action_done)
+                    btn.contentDescription = getString(R.string.desc_action_done)
+                    btn.textSize = 18f
+                }
+                else -> {
+                    btn.text = getString(R.string.action_enter)
+                    btn.contentDescription = getString(R.string.desc_action_enter)
+                    btn.textSize = 20f
+                }
+            }
+        } else {
+            // 多行編輯或一般換行
+            btn.text = getString(R.string.action_enter)
+            btn.contentDescription = getString(R.string.desc_action_enter)
+            btn.textSize = 20f
+            btn.backgroundTintList = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.ime_card))
+        }
+    }
+
+    /**
+     * 處理送出／執行／確認按鍵點擊事件
+     */
+    private fun handleActionButton() {
+        triggerHapticFeedback(30)
+        val ic = currentInputConnection ?: return
+        val info = currentInputEditorInfo ?: lastEditorInfo
+
+        if (info != null) {
+            // 1. 若應用程式指定了自訂 actionId
+            if (info.actionId != 0) {
+                ic.performEditorAction(info.actionId)
+                return
+            }
+
+            // 2. 若為特定 IME 動作
+            val action = info.imeOptions and EditorInfo.IME_MASK_ACTION
+            val noEnter = (info.imeOptions and EditorInfo.IME_FLAG_NO_ENTER_ACTION) != 0
+
+            if (!noEnter && action != EditorInfo.IME_ACTION_UNSPECIFIED && action != EditorInfo.IME_ACTION_NONE) {
+                ic.performEditorAction(action)
+                return
+            }
+        }
+
+        // 3. 多行換行或一般 Enter 鍵
+        sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER)
     }
 
     /**
