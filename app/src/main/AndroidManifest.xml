@@ -35,6 +35,13 @@
             </intent-filter>
         </activity>
 
+        <!-- Vocabulary Management Activity -->
+        <activity
+            android:name=".VocabularyActivity"
+            android:label="個人詞庫管理"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
 
 
         <service

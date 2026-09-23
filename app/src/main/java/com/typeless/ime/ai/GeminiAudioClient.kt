@@ -84,8 +84,16 @@ class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
     /**
      * [Text Polish Mode] (Primary recommended mode)
      * Passes the raw transcript from Groq or local STT to Gemini for filler word removal and grammar polish.
+     *
+     * @param rawText The raw transcript from STT.
+     * @param preferredModel Preferred Gemini model ID.
+     * @param knownVocabulary List of custom user vocabulary and technical terms for homophone correction.
      */
-    fun polishText(rawText: String, preferredModel: String? = null): Result<String> {
+    fun polishText(
+        rawText: String,
+        preferredModel: String? = null,
+        knownVocabulary: List<String>? = null
+    ): Result<String> {
         val apiKey = apiKeyProvider()
         if (apiKey.isNullOrBlank()) {
             return Result.failure(IllegalStateException("Gemini API Key is not configured"))
@@ -96,7 +104,7 @@ class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
         }
 
         val targetModel = preferredModel?.takeIf { it.isNotBlank() } ?: DEFAULT_MODEL
-        val jsonPayload = buildTextRequestJson(rawText)
+        val jsonPayload = buildTextRequestJson(rawText, knownVocabulary)
 
         return try {
             val polished = executeCallWithRetry(targetModel, apiKey, jsonPayload)
@@ -113,7 +121,11 @@ class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
     /**
      * [Multimodal Direct Audio Mode] (Fallback mode)
      */
-    fun transcribeAndPolish(audioFile: File, preferredModel: String? = null): Result<String> {
+    fun transcribeAndPolish(
+        audioFile: File,
+        preferredModel: String? = null,
+        knownVocabulary: List<String>? = null
+    ): Result<String> {
         val apiKey = apiKeyProvider()
         if (apiKey.isNullOrBlank()) {
             return Result.failure(IllegalStateException("Gemini API Key is not configured"))
@@ -127,7 +139,7 @@ class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
 
         return try {
             val audioBase64 = encodeFileToBase64(audioFile)
-            val jsonPayload = buildAudioRequestJson(audioBase64)
+            val jsonPayload = buildAudioRequestJson(audioBase64, knownVocabulary)
             val polished = executeCallWithRetry(targetModel, apiKey, jsonPayload)
             Result.success(polished)
         } catch (e: RateLimitException) {
@@ -196,13 +208,32 @@ class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
         }
     }
 
-    private fun buildTextRequestJson(rawText: String): String {
+    /**
+     * Composes the system prompt, dynamically appending custom vocabulary and fuzzy homophone
+     * restoration guidelines if known terms are supplied.
+     */
+    private fun buildSystemPrompt(knownVocabulary: List<String>? = null): String {
+        if (knownVocabulary.isNullOrEmpty()) {
+            return SYSTEM_PROMPT
+        }
+        val vocabListStr = knownVocabulary.joinToString(", ")
+        return """$SYSTEM_PROMPT
+
+8. 【使用者專屬詞庫與模糊校正規範】：
+   - 以下為使用者高頻使用的標準專有名詞清單：
+     [$vocabListStr]
+   - 若逐字稿中出現發音或語意高度疑似清單中詞彙的同音錯字、口誤或被誤聽為同音漢字（例如：「底坡」還原為「deploy」、「批啊」還原為「PR」、「插可」還原為「check」、「不讓取」還原為「branch」），請優先還原為清單中的標準專有名詞型態與標準大小寫。
+   - 若上下文語意完全無關，則絕對不要生硬置換。"""
+    }
+
+    private fun buildTextRequestJson(rawText: String, knownVocabulary: List<String>? = null): String {
         val root = JSONObject()
 
         // System Instruction
+        val promptText = buildSystemPrompt(knownVocabulary)
         val systemInstruction = JSONObject().apply {
             put("parts", JSONArray().apply {
-                put(JSONObject().put("text", SYSTEM_PROMPT))
+                put(JSONObject().put("text", promptText))
             })
         }
         root.put("system_instruction", systemInstruction)
@@ -228,12 +259,13 @@ class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
         return root.toString()
     }
 
-    private fun buildAudioRequestJson(audioBase64: String): String {
+    private fun buildAudioRequestJson(audioBase64: String, knownVocabulary: List<String>? = null): String {
         val root = JSONObject()
 
+        val promptText = buildSystemPrompt(knownVocabulary)
         val systemInstruction = JSONObject().apply {
             put("parts", JSONArray().apply {
-                put(JSONObject().put("text", SYSTEM_PROMPT))
+                put(JSONObject().put("text", promptText))
             })
         }
         root.put("system_instruction", systemInstruction)

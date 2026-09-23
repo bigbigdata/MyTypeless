@@ -114,9 +114,39 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
+                android:layout_marginBottom="24dp"
                 android:text="🔑 免費取得 Gemini API Key (aistudio.google.com)"
                 android:textColor="@color/ime_primary"
                 android:textSize="12sp" />
+
+            <!-- Section 3: Personal Vocabulary -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="3. 個人專屬詞庫（中英夾雜精準偏誤注入）"
+                android:textColor="@color/ime_primary"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tv_vocab_stats"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="已收錄常用專有名詞，點擊自訂或新增詞彙"
+                android:textColor="@color/ime_text_secondary"
+                android:textSize="13sp" />
+
+            <Button
+                android:id="@+id/btn_manage_vocabulary"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:layout_marginBottom="16dp"
+                android:text="📚 管理個人專屬詞庫與權重"
+                android:textColor="@color/ime_primary"
+                android:textSize="13sp" />
 
         </LinearLayout>
     </ScrollView>

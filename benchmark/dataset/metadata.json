@@ -1,6 +1,6 @@
 {
-  "description": "MyTypeless Pipeline Benchmark Test Cases",
-  "version": "1.0",
+  "description": "MyTypeless Pipeline Benchmark Test Cases with Code-Switching and Homophone Recovery",
+  "version": "2.0",
   "test_cases": [
     {
       "id": "case_short_01",
@@ -57,6 +57,38 @@
       "expected_output": "Please ping me when you are ready for the call.",
       "fast_path_eligible": false,
       "key_terms": ["ping", "ready", "call"]
+    },
+    {
+      "id": "case_homophone_01",
+      "category": "音近誤聽還原 (Homophone Recovery - Deploy & PR)",
+      "raw_stt": "請幫我確認一下今天的底坡流程還有批啊",
+      "expected_output": "請幫我確認一下今天的 deploy 流程，還有 PR。",
+      "fast_path_eligible": false,
+      "key_terms": ["deploy", "PR"]
+    },
+    {
+      "id": "case_homophone_02",
+      "category": "音近誤聽還原 (Homophone Recovery - Notion & Check)",
+      "raw_stt": "這份文件已經同步到鬧嬸上了請幫我插可",
+      "expected_output": "這份文件已經同步到 Notion 上了，請幫我 check。",
+      "fast_path_eligible": false,
+      "key_terms": ["Notion", "check"]
+    },
+    {
+      "id": "case_homophone_03",
+      "category": "音近誤聽還原 (Homophone Recovery - Branch & Merge)",
+      "raw_stt": "記得切換到新的不讓取然後把程式碼墨汁進去",
+      "expected_output": "記得切換到新的 branch，然後把程式碼 merge 進去。",
+      "fast_path_eligible": false,
+      "key_terms": ["branch", "merge"]
+    },
+    {
+      "id": "case_homophone_04",
+      "category": "音近誤聽還原 (Homophone Recovery - TSMC & API/SDK)",
+      "raw_stt": "台積店下半年開案需要微調ㄟ批哀跟欸斯滴可以規格",
+      "expected_output": "台積電下半年開案需要微調 API 跟 SDK 規格。",
+      "fast_path_eligible": false,
+      "key_terms": ["台積電", "API", "SDK"]
     }
   ]
 }

@@ -27,6 +27,7 @@ import com.google.android.material.button.MaterialButton
 import com.typeless.ime.ai.GeminiAudioClient
 import com.typeless.ime.ai.GroqWhisperClient
 import com.typeless.ime.audio.AudioRecorderManager
+import com.typeless.ime.vocabulary.VocabularyRepository
 import java.io.File
 import kotlin.concurrent.thread
 
@@ -51,6 +52,7 @@ class TypelessInputMethodService : InputMethodService() {
     private lateinit var settingsManager: SettingsManager
     private lateinit var groqClient: GroqWhisperClient
     private lateinit var geminiClient: GeminiAudioClient
+    private lateinit var vocabularyRepository: VocabularyRepository
 
     private var isRecording = false
     private var touchDownTime = 0L
@@ -84,6 +86,7 @@ class TypelessInputMethodService : InputMethodService() {
         super.onCreate()
         audioRecorderManager = AudioRecorderManager(this)
         settingsManager = SettingsManager(this)
+        vocabularyRepository = VocabularyRepository.getInstance(this)
         groqClient = GroqWhisperClient { settingsManager.groqApiKey }
         geminiClient = GeminiAudioClient { settingsManager.apiKey }
     }
@@ -463,10 +466,14 @@ class TypelessInputMethodService : InputMethodService() {
     private fun processAudioPipeline(audioFile: File) {
         var rawText: String? = null
 
-        // Stage 1: Speech-to-Text (STT) via Groq Whisper
+        // Query vocabulary bias
+        val dynamicWhisperPrompt = vocabularyRepository.buildWhisperPrompt()
+        val knownVocabulary = vocabularyRepository.getAllTermsForGemini()
+
+        // Stage 1: Speech-to-Text (STT) via Groq Whisper with dynamic vocabulary bias
         if (settingsManager.hasGroqApiKey) {
             updateStatusOnMain("⚡ Groq 轉錄中...")
-            val groqResult = groqClient.transcribe(audioFile)
+            val groqResult = groqClient.transcribe(audioFile, dynamicWhisperPrompt)
             groqResult.onSuccess { text ->
                 if (text.isNotBlank()) {
                     rawText = text
@@ -479,7 +486,7 @@ class TypelessInputMethodService : InputMethodService() {
         // Fallback: If no Groq Key is available or Groq STT fails, try direct Gemini multimodal transcription if Gemini Key is configured
         if (rawText.isNullOrBlank() && settingsManager.hasApiKey) {
             updateStatusOnMain("🤖 Gemini 直傳辨識中...")
-            val directResult = geminiClient.transcribeAndPolish(audioFile, settingsManager.model)
+            val directResult = geminiClient.transcribeAndPolish(audioFile, settingsManager.model, knownVocabulary)
             directResult.onSuccess { polished ->
                 safeDelete(audioFile)
                 onProcessingSuccess("🤖 Gemini 直傳完成", polished)
@@ -509,10 +516,10 @@ class TypelessInputMethodService : InputMethodService() {
             return
         }
 
-        // Stage 2: Gemini text polishing and structuring
+        // Stage 2: Gemini text polishing and structuring with known vocabulary bias
         if (settingsManager.hasApiKey) {
             updateStatusOnMain("🤖 Gemini 潤飾中...")
-            val polishResult = geminiClient.polishText(rawText!!, settingsManager.model)
+            val polishResult = geminiClient.polishText(rawText!!, settingsManager.model, knownVocabulary)
             polishResult.onSuccess { polished ->
                 val textToInject = if (polished.isNotBlank()) polished else rawText!!
                 Log.i(TAG, "===> [Stage 2 Gemini Polished]: \"$textToInject\"")
@@ -567,6 +574,9 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     private fun onProcessingSuccess(sourceStatus: String, text: String) {
+        if (text.isNotBlank()) {
+            vocabularyRepository.recordUsageAsync(text)
+        }
         mainHandler.post {
             resetRecordButtonUi()
             if (text.isNotBlank()) {

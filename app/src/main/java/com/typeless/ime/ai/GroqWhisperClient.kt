@@ -56,8 +56,11 @@ class GroqWhisperClient(private val apiKeyProvider: () -> String?) {
 
     /**
      * Transcribes an audio file into raw text (supports M4A/AAC and WAV).
+     *
+     * @param audioFile The recorded audio file.
+     * @param customPrompt Optional dynamic vocabulary prompt to bias Whisper decoding.
      */
-    fun transcribe(audioFile: File): Result<String> {
+    fun transcribe(audioFile: File, customPrompt: String? = null): Result<String> {
         val apiKey = apiKeyProvider()
         if (apiKey.isNullOrBlank()) {
             return Result.failure(IllegalStateException("Groq API Key is not configured"))
@@ -66,6 +69,8 @@ class GroqWhisperClient(private val apiKeyProvider: () -> String?) {
         if (!audioFile.exists() || audioFile.length() <= 100) {
             return Result.failure(IllegalArgumentException("Audio file is empty or recording duration was too short"))
         }
+
+        val promptToUse = customPrompt?.takeIf { it.isNotBlank() } ?: WHISPER_PROMPT
 
         return try {
             val mimeString = if (audioFile.name.endsWith(".m4a", ignoreCase = true)) {
@@ -82,7 +87,7 @@ class GroqWhisperClient(private val apiKeyProvider: () -> String?) {
                 .addFormDataPart("model", MODEL_NAME)
                 .addFormDataPart("response_format", "json")
                 .addFormDataPart("temperature", "0.0")
-                .addFormDataPart("prompt", WHISPER_PROMPT)
+                .addFormDataPart("prompt", promptToUse)
                 .build()
 
             val request = Request.Builder()
