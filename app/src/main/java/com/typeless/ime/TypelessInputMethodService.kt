@@ -23,6 +23,7 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.ContextCompat
+import com.google.android.material.button.MaterialButton
 import com.typeless.ime.ai.GeminiAudioClient
 import com.typeless.ime.ai.GroqWhisperClient
 import com.typeless.ime.audio.AudioRecorderManager
@@ -57,10 +58,10 @@ class TypelessInputMethodService : InputMethodService() {
 
     private var tvStatus: TextView? = null
     private var pbAudioLevel: ProgressBar? = null
-    private var btnRecord: Button? = null
-    private var btnSpace: Button? = null
-    private var btnDelete: Button? = null
-    private var btnAction: Button? = null
+    private var btnRecord: MaterialButton? = null
+    private var btnSpace: MaterialButton? = null
+    private var btnDelete: MaterialButton? = null
+    private var btnAction: MaterialButton? = null
     private var lastEditorInfo: EditorInfo? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -101,6 +102,15 @@ class TypelessInputMethodService : InputMethodService() {
         btnSpace = view.findViewById(R.id.btn_space)
         btnDelete = view.findViewById(R.id.btn_delete)
         btnAction = view.findViewById(R.id.btn_action)
+
+        // Ensure Material vector icons and tints are applied to Space and Delete keys
+        btnSpace?.setIconResource(R.drawable.ic_space_bar)
+        btnSpace?.iconTint = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.ime_text_primary))
+        btnSpace?.iconGravity = MaterialButton.ICON_GRAVITY_TEXT_START
+
+        btnDelete?.setIconResource(R.drawable.ic_backspace)
+        btnDelete?.iconTint = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.ime_text_primary))
+        btnDelete?.iconGravity = MaterialButton.ICON_GRAVITY_TEXT_START
 
         updateStatusPrompt()
 

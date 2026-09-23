@@ -78,7 +78,7 @@
         android:visibility="invisible" />
 
     <!-- Row 1: Primary Centered Voice Input Button -->
-    <Button
+    <com.google.android.material.button.MaterialButton
         android:id="@+id/btn_record"
         style="@style/Widget.MaterialComponents.Button"
         android:layout_width="match_parent"
@@ -99,7 +99,7 @@
         android:gravity="center_vertical"
         android:orientation="horizontal">
 
-        <Button
+        <com.google.android.material.button.MaterialButton
             android:id="@+id/btn_action"
             style="@style/Widget.MaterialComponents.Button"
             android:layout_width="68dp"
@@ -114,7 +114,7 @@
             android:textSize="20sp"
             android:textStyle="bold" />
 
-        <Button
+        <com.google.android.material.button.MaterialButton
             android:id="@+id/btn_space"
             style="@style/Widget.MaterialComponents.Button"
             android:layout_width="0dp"
@@ -130,10 +130,10 @@
             app:icon="@drawable/ic_space_bar"
             app:iconGravity="textStart"
             app:iconPadding="0dp"
-            app:iconSize="24dp"
+            app:iconSize="28dp"
             app:iconTint="@color/ime_text_primary" />
 
-        <Button
+        <com.google.android.material.button.MaterialButton
             android:id="@+id/btn_delete"
             style="@style/Widget.MaterialComponents.Button"
             android:layout_width="68dp"
@@ -146,7 +146,7 @@
             app:icon="@drawable/ic_backspace"
             app:iconGravity="textStart"
             app:iconPadding="0dp"
-            app:iconSize="24dp"
+            app:iconSize="26dp"
             app:iconTint="@color/ime_text_primary" />
     </LinearLayout>
 
