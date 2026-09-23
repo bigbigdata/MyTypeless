@@ -24,4 +24,5 @@
     <string name="desc_action_done">完成</string>
     <string name="desc_action_enter">換行或確認</string>
     <string name="desc_action_space">空白鍵</string>
+    <string name="desc_delete">退格刪除</string>
 </resources>

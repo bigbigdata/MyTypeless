@@ -77,7 +77,22 @@
         android:progressTint="@color/ime_recording_pulse"
         android:visibility="invisible" />
 
-    <!-- Bottom Buttons: Main Voice Button + Space Key + Ergonomic Backspace Delete Key + Action/Enter Key -->
+    <!-- Row 1: Primary Centered Voice Input Button -->
+    <Button
+        android:id="@+id/btn_record"
+        style="@style/Widget.MaterialComponents.Button"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:layout_marginBottom="8dp"
+        android:backgroundTint="@color/ime_primary"
+        android:insetTop="0dp"
+        android:insetBottom="0dp"
+        android:text="@string/btn_record_start"
+        android:textColor="@color/ime_on_primary"
+        android:textSize="16sp"
+        android:textStyle="bold" />
+
+    <!-- Row 2: Action/Enter Key + Expanded Space Bar + Material Backspace Delete Key -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -85,61 +100,54 @@
         android:orientation="horizontal">
 
         <Button
-            android:id="@+id/btn_record"
-            style="@style/Widget.MaterialComponents.Button"
-            android:layout_width="0dp"
-            android:layout_height="64dp"
-            android:layout_weight="1"
-            android:backgroundTint="@color/ime_primary"
-            android:paddingStart="4dp"
-            android:paddingEnd="4dp"
-            android:text="@string/btn_record_start"
-            android:textColor="@color/ime_on_primary"
-            android:textSize="15sp"
-            android:textStyle="bold" />
-
-        <Button
-            android:id="@+id/btn_space"
-            style="@style/Widget.MaterialComponents.Button"
-            android:layout_width="56dp"
-            android:layout_height="64dp"
-            android:layout_marginStart="6dp"
-            android:backgroundTint="@color/ime_card"
-            android:contentDescription="@string/desc_action_space"
-            android:padding="0dp"
-            android:text="@string/action_space"
-            android:textAllCaps="false"
-            android:textColor="@color/ime_text_primary"
-            android:textSize="14sp"
-            android:textStyle="bold" />
-
-        <Button
-            android:id="@+id/btn_delete"
-            style="@style/Widget.MaterialComponents.Button"
-            android:layout_width="56dp"
-            android:layout_height="64dp"
-            android:layout_marginStart="6dp"
-            android:backgroundTint="@color/ime_card"
-            android:contentDescription="退格刪除"
-            android:padding="0dp"
-            android:text="⌫"
-            android:textColor="@color/ime_text_primary"
-            android:textSize="22sp"
-            android:textStyle="bold" />
-
-        <Button
             android:id="@+id/btn_action"
             style="@style/Widget.MaterialComponents.Button"
-            android:layout_width="60dp"
-            android:layout_height="64dp"
-            android:layout_marginStart="6dp"
+            android:layout_width="68dp"
+            android:layout_height="52dp"
             android:backgroundTint="@color/ime_card"
             android:contentDescription="@string/desc_action_enter"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
             android:padding="0dp"
             android:text="@string/action_enter"
             android:textColor="@color/ime_text_primary"
             android:textSize="20sp"
             android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/btn_space"
+            style="@style/Widget.MaterialComponents.Button"
+            android:layout_width="0dp"
+            android:layout_height="52dp"
+            android:layout_marginStart="8dp"
+            android:layout_marginEnd="8dp"
+            android:layout_weight="1"
+            android:backgroundTint="@color/ime_card"
+            android:contentDescription="@string/desc_action_space"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:padding="0dp"
+            app:icon="@drawable/ic_space_bar"
+            app:iconGravity="textStart"
+            app:iconPadding="0dp"
+            app:iconSize="24dp"
+            app:iconTint="@color/ime_text_primary" />
+
+        <Button
+            android:id="@+id/btn_delete"
+            style="@style/Widget.MaterialComponents.Button"
+            android:layout_width="68dp"
+            android:layout_height="52dp"
+            android:backgroundTint="@color/ime_card"
+            android:contentDescription="@string/desc_delete"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:padding="0dp"
+            app:icon="@drawable/ic_backspace"
+            app:iconGravity="textStart"
+            app:iconPadding="0dp"
+            app:iconSize="24dp"
+            app:iconTint="@color/ime_text_primary" />
     </LinearLayout>
 
 
