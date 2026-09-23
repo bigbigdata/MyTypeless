@@ -16,10 +16,12 @@
     <string name="action_next">➜</string>
     <string name="action_done">✓</string>
     <string name="action_enter">↵</string>
+    <string name="action_space">Space</string>
     <string name="desc_action_search">搜尋</string>
     <string name="desc_action_send">送出</string>
     <string name="desc_action_go">前往</string>
     <string name="desc_action_next">下一步</string>
     <string name="desc_action_done">完成</string>
     <string name="desc_action_enter">換行或確認</string>
+    <string name="desc_action_space">空白鍵</string>
 </resources>

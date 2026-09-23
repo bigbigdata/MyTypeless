@@ -38,6 +38,7 @@ import kotlin.concurrent.thread
  * 3. Robust hardware lifecycle protection: Audio session termination on keyboard hide.
  * 4. Native backspace key (single tap delete, long-press continuous backspace).
  * 5. Context-aware action/enter key (dynamically displays Search, Send, Go, Next, Done, or Newline based on EditorInfo).
+ * 6. Ergonomic Space key (single-tap space insertion and long-press continuous repeat).
  */
 class TypelessInputMethodService : InputMethodService() {
 
@@ -57,6 +58,7 @@ class TypelessInputMethodService : InputMethodService() {
     private var tvStatus: TextView? = null
     private var pbAudioLevel: ProgressBar? = null
     private var btnRecord: Button? = null
+    private var btnSpace: Button? = null
     private var btnDelete: Button? = null
     private var btnAction: Button? = null
     private var lastEditorInfo: EditorInfo? = null
@@ -67,6 +69,13 @@ class TypelessInputMethodService : InputMethodService() {
         override fun run() {
             handleDeleteSurroundingText()
             deleteHandler.postDelayed(this, 50L)
+        }
+    }
+    private val spaceHandler = Handler(Looper.getMainLooper())
+    private val spaceRunnable = object : Runnable {
+        override fun run() {
+            handleSpace()
+            spaceHandler.postDelayed(this, 60L)
         }
     }
 
@@ -89,6 +98,7 @@ class TypelessInputMethodService : InputMethodService() {
         tvStatus = view.findViewById(R.id.tv_status)
         pbAudioLevel = view.findViewById(R.id.pb_audio_level)
         btnRecord = view.findViewById(R.id.btn_record)
+        btnSpace = view.findViewById(R.id.btn_space)
         btnDelete = view.findViewById(R.id.btn_delete)
         btnAction = view.findViewById(R.id.btn_action)
 
@@ -102,6 +112,23 @@ class TypelessInputMethodService : InputMethodService() {
         // Bind voice recording touch gestures
         btnRecord?.setOnTouchListener { _, event ->
             handleRecordTouch(event)
+        }
+
+        // Bind space key (single-tap space, long-press continuous space)
+        btnSpace?.setOnTouchListener { _, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    triggerHapticFeedback(30)
+                    handleSpace()
+                    spaceHandler.postDelayed(spaceRunnable, 350L)
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    spaceHandler.removeCallbacks(spaceRunnable)
+                    true
+                }
+                else -> false
+            }
         }
 
         // Bind backspace key (single-tap delete, long-press continuous backspace)
@@ -156,6 +183,7 @@ class TypelessInputMethodService : InputMethodService() {
 
     private fun cancelCurrentRecording() {
         deleteHandler.removeCallbacks(deleteRunnable)
+        spaceHandler.removeCallbacks(spaceRunnable)
         if (isRecording) {
             isRecording = false
             audioRecorderManager.cancelRecording()
@@ -179,6 +207,14 @@ class TypelessInputMethodService : InputMethodService() {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         startActivity(intent)
+    }
+
+    /**
+     * Handles space key insertion.
+     */
+    private fun handleSpace() {
+        val ic = currentInputConnection ?: return
+        ic.commitText(" ", 1)
     }
 
     /**
@@ -586,6 +622,7 @@ class TypelessInputMethodService : InputMethodService() {
     override fun onDestroy() {
         super.onDestroy()
         deleteHandler.removeCallbacks(deleteRunnable)
+        spaceHandler.removeCallbacks(spaceRunnable)
         if (isRecording) {
             audioRecorderManager.cancelRecording()
         }
