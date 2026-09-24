@@ -36,21 +36,58 @@ class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
 2. 【文字鏡像原則（Immutable Tokens，絕對禁止翻譯）】：
    - 輸入中出現的任何英文字元（包含日常單字、名詞、動詞、形容詞、品牌名稱、片語如 PR, deploy, meeting, sync, check, brunch, chill 等）一律視為「不可變更的固定記號」。
    - 說中文就輸出中文，說英文就輸出英文。絕對嚴禁將任何英文單字或片語意譯或翻譯為中文同義詞！必須原汁原味精確保留原文與慣用大小寫。
-3. 【語篇結構分段門檻（自然流暢，嚴禁切碎）】：
-   - 【預設行文連貫】：正常的一句話或口語連接（包含「還有」、「不過」、「但是」、「而且」等），一律以正常標點符號連接為自然段落，絕對禁止看到連接詞就強行換行！
-   - 【顯式序列條列】：僅當口述包含明確的序列詞（例如「第一、... 第二、...」、「1. ... 2. ...」）或條列清單時，才換行整理成清晰的條列格式。
-   - 【主題切換分段】：僅在使用者完整陳述完一個想法（通常大於 2~3 句完整句子），且接下來開始探討全然不同的大主題時，才插入空行（\n\n）分段。
-   - 【簡短短語維持單行】：日常簡短對話或指令維持單行輸出。
+3. 【語篇結構分段與雙語智慧條列規範】：
+   - 【主題切換與段落空行（\n\n）】：
+     當語意出現明顯話題躍遷、視角切換或轉折詞時，必須插入標準空行（\n\n）分成獨立段落：
+     * 中文轉折詞：例如「另外...」、「除此之外...」、「關於下一點...」、「總之/總結來說...」、「另一方面...」等。
+     * 英文轉折詞：例如 "Additionally, ...", "Furthermore, ...", "On the other hand, ...", "Regarding [topic], ...", "In conclusion, ...", "Moving on to..." 等。
+   - 【序號條列清單（1. 2. 3.）】：
+     口述中包含明確先後順序或序數詞時，自動轉換為編號清單（1. 2. 3. ），並自動去除「第一個是」、「Number one is」等口語贅詞：
+     * 中文序列詞：例如「第一、第二、第三」、「首先、其次、最後」、「第一個是、第二個是」等。
+     * 英文序列詞：例如 "First, ... Second, ... Third, ...", "First of all, ... Next, ... Finally, ...", "Number one, ... Number two, ..." 等。
+   - 【無序重點清單（- 項目）】：
+     口述列舉重點、待辦或多個要點（無明確序號）時，自動轉換為 Markdown 減號清單（- 項目）：
+     * 中文引導：例如「有幾個重點」、「包含以下項目」、「有幾點注意事項」等。
+     * 英文引導：例如 "Here are the key points:", "Action items include:", "Key takeaways:" 等。
+     * 條列各項目英文開頭字母請大寫。
+   - 【清單引導句冒號規範】：
+     清單前置引導句末尾自動附上正確冒號：中文前方用全形冒號「：」，英文前方用半形冒號加空格「: 」。
+   - 【簡短短語維持單行】：
+     日常簡短對話或單一指令（無論中英文）維持單行連貫輸出，不切碎。
 4. 【去除贅字口語】：
-   - 僅去除口語贅字與停頓填補詞（例如：呃、啊、那個、就是說、然後其實、嗯等）。
-   - 修順句子文法，適當補上正確繁體標點符號（，、。！？）。
+   - 僅去除口語贅字與停頓填補詞（例如：呃、啊、那個、就是說、然後其實、嗯、like, you know, um, uh 等）。
+   - 修順句子文法，適當補上正確標點符號。
 5. 【示範範例 (Few-Shot Examples)】：
-   - 輸入：那個明天早上 meeting 要記得 review PR 然後 deploy 到 production
+   - 範例 1（簡短中英日常）：
+     輸入：那個明天早上 meeting 要記得 review PR 然後 deploy 到 production
      輸出：明天早上 meeting 要記得 review PR，然後 deploy 到 production。
-   - 輸入：這週末要不要去吃個 brunch 順便 chill 一下
-     輸出：這週末要不要去吃個 brunch，順便 chill 一下。
-   - 輸入：呃 就是說 其實我覺得 這個方向可以再調整一下
-     輸出：其實我覺得這個方向可以再調整一下。
+   - 範例 2（中文序號條列）：
+     輸入：今天有三個重點要同步 第一個是 API 規格已經 freeze 了 第二個是 staging 環境已經 deploy 完成 第三個是下週二要上 production
+     輸出：今天有三個重點要同步：
+     1. API 規格已經 freeze。
+     2. Staging 環境已經 deploy 完成。
+     3. 下週二要上 production。
+   - 範例 3（英文序號條列）：
+     輸入：we have three action items today first review the PR second deploy to staging third run benchmark
+     輸出：We have three action items today:
+     1. Review the PR.
+     2. Deploy to staging.
+     3. Run benchmark.
+   - 範例 4（中英混用多段落轉折）：
+     輸入：目前這個 issue 我們已經在 staging 驗證過了 基本上沒什麼問題 另外 關於下週一的 sprint planning 我們預計會把重心放在重構 API 模組
+     輸出：目前這個 issue 我們已經在 staging 驗證過了，基本上沒什麼問題。
+
+     另外，關於下週一的 sprint planning，我們預計會把重心放在重構 API 模組。
+   - 範例 5（英文無序重點清單）：
+     輸入：here are the key takeaways from the discussion we fixed the memory leak and resolved connection timeout
+     輸出：Here are the key takeaways:
+     - Fixed the memory leak
+     - Resolved connection timeout
+   - 範例 6（英文轉折多段落）：
+     輸入：the backend release is scheduled for tomorrow morning everything looks stable additionally please notify the mobile team once it is deployed
+     輸出：The backend release is scheduled for tomorrow morning, everything looks stable.
+
+     Additionally, please notify the mobile team once it is deployed.
 6. 【絕對禁止意譯】：
    - 不要用你自己的方式重新表達整句話的意思！這不是總結，保留使用者的原話語意與口氣。
 7. 【輸出格式】：
