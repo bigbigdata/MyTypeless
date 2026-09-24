@@ -41,6 +41,7 @@ import kotlin.concurrent.thread
  * 4. Native backspace key (single tap delete, long-press continuous backspace).
  * 5. Context-aware action/enter key (dynamically displays Search, Send, Go, Next, Done, or Newline based on EditorInfo).
  * 6. Ergonomic Space key (single-tap space insertion and long-press continuous repeat).
+ * 7. Abort / Cancel capability: Slide-up gesture to cancel during hold, and dynamic close icon to cancel anytime during recording/processing.
  */
 class TypelessInputMethodService : InputMethodService() {
 
@@ -55,8 +56,14 @@ class TypelessInputMethodService : InputMethodService() {
     private lateinit var vocabularyRepository: VocabularyRepository
 
     private var isRecording = false
+    private var isProcessing = false
+    private var isSlidingToCancel = false
     private var touchDownTime = 0L
+    private var touchDownX = 0f
+    private var touchDownY = 0f
     private var wasRecordingAtDown = false
+    @Volatile
+    private var activeProcessingJobId = 0L
 
     private var tvStatus: TextView? = null
     private var pbAudioLevel: ProgressBar? = null
@@ -144,10 +151,18 @@ class TypelessInputMethodService : InputMethodService() {
             }
         }
 
-        // Bind backspace key (single-tap delete, long-press continuous backspace)
+        // Bind backspace key (single-tap delete, long-press continuous backspace; abort recording/processing if active)
         btnDelete?.setOnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
+                    if (isRecording) {
+                        abortRecordingFlow(getString(R.string.status_recording_aborted))
+                        return@setOnTouchListener true
+                    }
+                    if (isProcessing) {
+                        abortProcessingFlow()
+                        return@setOnTouchListener true
+                    }
                     triggerHapticFeedback(30)
                     handleDeleteSurroundingText()
                     deleteHandler.postDelayed(deleteRunnable, 350L)
@@ -198,12 +213,10 @@ class TypelessInputMethodService : InputMethodService() {
         deleteHandler.removeCallbacks(deleteRunnable)
         spaceHandler.removeCallbacks(spaceRunnable)
         if (isRecording) {
-            isRecording = false
-            audioRecorderManager.cancelRecording()
-            btnRecord?.post {
-                resetRecordButtonUi()
-                updateStatusPrompt()
-            }
+            abortRecordingFlow()
+        }
+        if (isProcessing) {
+            abortProcessingFlow()
         }
     }
 
@@ -341,12 +354,17 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     /**
-     * Handles recording touch gestures (hold to talk / tap to toggle).
+     * Handles recording touch gestures:
+     * - Hold to talk: press to speak, release to submit, slide up to cancel.
+     * - Tap to toggle: tap to start, tap again to submit, tap cancel button to abort.
      */
     private fun handleRecordTouch(event: MotionEvent): Boolean {
         when (event.action) {
             MotionEvent.ACTION_DOWN -> {
                 touchDownTime = System.currentTimeMillis()
+                touchDownY = event.rawY
+                touchDownX = event.rawX
+                isSlidingToCancel = false
                 wasRecordingAtDown = isRecording
 
                 if (!isRecording) {
@@ -376,8 +394,42 @@ class TypelessInputMethodService : InputMethodService() {
                 return true
             }
 
+            MotionEvent.ACTION_MOVE -> {
+                if (isRecording && !wasRecordingAtDown) {
+                    val deltaY = touchDownY - event.rawY
+                    if (deltaY > 100f) {
+                        if (!isSlidingToCancel) {
+                            isSlidingToCancel = true
+                            triggerHapticFeedback(50)
+                            btnRecord?.text = getString(R.string.btn_record_slide_to_cancel)
+                            btnRecord?.backgroundTintList = ColorStateList.valueOf(
+                                ContextCompat.getColor(this, R.color.ime_card)
+                            )
+                            tvStatus?.text = getString(R.string.status_slide_to_cancel)
+                        }
+                    } else if (deltaY < 50f) {
+                        if (isSlidingToCancel) {
+                            isSlidingToCancel = false
+                            triggerHapticFeedback(30)
+                            btnRecord?.text = getString(R.string.btn_record_stop)
+                            btnRecord?.backgroundTintList = ColorStateList.valueOf(
+                                ContextCompat.getColor(this, R.color.ime_recording)
+                            )
+                            tvStatus?.text = getString(R.string.status_recording)
+                        }
+                    }
+                }
+                return true
+            }
+
             MotionEvent.ACTION_UP -> {
                 val pressDuration = System.currentTimeMillis() - touchDownTime
+
+                if (isSlidingToCancel) {
+                    isSlidingToCancel = false
+                    abortRecordingFlow(getString(R.string.status_recording_aborted))
+                    return true
+                }
 
                 if (wasRecordingAtDown) {
                     stopRecordingFlow()
@@ -385,15 +437,15 @@ class TypelessInputMethodService : InputMethodService() {
                     if (pressDuration >= 400L) {
                         stopRecordingFlow()
                     } else {
-                        tvStatus?.text = "🎙️ 錄音中... 再次點擊即可送出"
+                        tvStatus?.text = getString(R.string.status_recording_tap)
                     }
                 }
                 return true
             }
 
             MotionEvent.ACTION_CANCEL -> {
-                if (!wasRecordingAtDown && isRecording) {
-                    stopRecordingFlow()
+                if (isSlidingToCancel || (!wasRecordingAtDown && isRecording)) {
+                    abortRecordingFlow(getString(R.string.status_recording_aborted))
                 }
                 return true
             }
@@ -421,12 +473,14 @@ class TypelessInputMethodService : InputMethodService() {
 
         if (success) {
             isRecording = true
+            isSlidingToCancel = false
             tvStatus?.text = getString(R.string.status_recording)
             pbAudioLevel?.visibility = View.VISIBLE
             btnRecord?.text = getString(R.string.btn_record_stop)
             btnRecord?.backgroundTintList = ColorStateList.valueOf(
                 ContextCompat.getColor(this, R.color.ime_recording)
             )
+            updateDeleteButtonToCancelMode()
         } else {
             tvStatus?.text = "麥克風啟動失敗，請確認未被佔用"
         }
@@ -435,6 +489,7 @@ class TypelessInputMethodService : InputMethodService() {
     private fun stopRecordingFlow() {
         val audioFile: File? = audioRecorderManager.stopRecording()
         isRecording = false
+        isSlidingToCancel = false
         triggerHapticFeedback(65)
 
         pbAudioLevel?.visibility = View.INVISIBLE
@@ -447,15 +502,67 @@ class TypelessInputMethodService : InputMethodService() {
         }
 
         // Transition to AI processing state
+        isProcessing = true
         btnRecord?.isEnabled = false
         btnRecord?.text = "⏳ 處理中..."
         btnRecord?.backgroundTintList = ColorStateList.valueOf(
             ContextCompat.getColor(this, R.color.ime_card)
         )
+        updateDeleteButtonToCancelMode()
 
+        val jobId = ++activeProcessingJobId
         thread(start = true, name = "TypelessProcessingThread") {
-            processAudioPipeline(audioFile)
+            processAudioPipeline(audioFile, jobId)
         }
+    }
+
+    /**
+     * Aborts and discards the active audio recording without transcription.
+     */
+    private fun abortRecordingFlow(statusMessage: String = "已中斷並放棄本次錄音") {
+        isRecording = false
+        isSlidingToCancel = false
+        audioRecorderManager.cancelRecording()
+        triggerHapticFeedback(80)
+
+        mainHandler.post {
+            pbAudioLevel?.visibility = View.INVISIBLE
+            pbAudioLevel?.progress = 0
+            resetRecordButtonUi()
+            tvStatus?.text = statusMessage
+            Toast.makeText(this, statusMessage, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /**
+     * Aborts the in-flight AI processing job and prevents text injection.
+     */
+    private fun abortProcessingFlow(statusMessage: String = "已中斷輸入") {
+        activeProcessingJobId++
+        isProcessing = false
+        triggerHapticFeedback(80)
+
+        mainHandler.post {
+            resetRecordButtonUi()
+            tvStatus?.text = statusMessage
+            Toast.makeText(this, statusMessage, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun updateDeleteButtonToCancelMode() {
+        btnDelete?.setIconResource(R.drawable.ic_close)
+        btnDelete?.iconTint = ColorStateList.valueOf(
+            ContextCompat.getColor(this, R.color.ime_recording)
+        )
+        btnDelete?.contentDescription = getString(R.string.desc_cancel)
+    }
+
+    private fun resetDeleteButtonUi() {
+        btnDelete?.setIconResource(R.drawable.ic_backspace)
+        btnDelete?.iconTint = ColorStateList.valueOf(
+            ContextCompat.getColor(this, R.color.ime_text_primary)
+        )
+        btnDelete?.contentDescription = getString(R.string.desc_delete)
     }
 
     /**
@@ -463,7 +570,7 @@ class TypelessInputMethodService : InputMethodService() {
      * Stage 1: Audio STT (Groq Whisper / Gemini Audio direct fallback)
      * Stage 2: Text Polishing (Gemini LLM / Local Fast-Path filter)
      */
-    private fun processAudioPipeline(audioFile: File) {
+    private fun processAudioPipeline(audioFile: File, jobId: Long) {
         var rawText: String? = null
 
         // Query vocabulary bias
@@ -489,7 +596,7 @@ class TypelessInputMethodService : InputMethodService() {
             val directResult = geminiClient.transcribeAndPolish(audioFile, settingsManager.model, knownVocabulary)
             directResult.onSuccess { polished ->
                 safeDelete(audioFile)
-                onProcessingSuccess("🤖 Gemini 直傳完成", polished)
+                onProcessingSuccess("🤖 Gemini 直傳完成", polished, jobId)
                 return
             }.onFailure { err ->
                 Log.w(TAG, "Gemini direct audio transcription failed: ${err.message}")
@@ -498,8 +605,10 @@ class TypelessInputMethodService : InputMethodService() {
 
         safeDelete(audioFile)
 
+        if (jobId != activeProcessingJobId) return
+
         if (rawText.isNullOrBlank()) {
-            onProcessingFailure("未偵測到清晰語音或轉錄失敗")
+            onProcessingFailure("未偵測到清晰語音或轉錄失敗", jobId)
             return
         }
 
@@ -512,7 +621,7 @@ class TypelessInputMethodService : InputMethodService() {
             val localCleaned = cleanFillerWordsLocally(rawText!!)
             val formatted = applyPanguSpacing(localCleaned)
             Log.i(TAG, "===> [Fast-Path Direct]: \"$formatted\"")
-            onProcessingSuccess("⚡ 極速直出 (Fast-Path)", formatted)
+            onProcessingSuccess("⚡ 極速直出 (Fast-Path)", formatted, jobId)
             return
         }
 
@@ -520,21 +629,22 @@ class TypelessInputMethodService : InputMethodService() {
         if (settingsManager.hasApiKey) {
             updateStatusOnMain("🤖 Gemini 潤飾中...")
             val polishResult = geminiClient.polishText(rawText!!, settingsManager.model, knownVocabulary)
+            if (jobId != activeProcessingJobId) return
             polishResult.onSuccess { polished ->
                 val textToInject = if (polished.isNotBlank()) polished else rawText!!
                 Log.i(TAG, "===> [Stage 2 Gemini Polished]: \"$textToInject\"")
-                onProcessingSuccess("⚡ Groq + 🤖 Gemini 潤飾完成", textToInject)
+                onProcessingSuccess("⚡ Groq + 🤖 Gemini 潤飾完成", textToInject, jobId)
             }.onFailure { err ->
                 Log.w(TAG, "Gemini polishing failed or rate limited (429), falling back to local output: ${err.message}")
                 val localCleaned = cleanFillerWordsLocally(rawText!!)
                 Log.i(TAG, "===> [Stage 2 Local Fallback]: \"$localCleaned\"")
-                onProcessingSuccess("⚡ Groq 直出（AI 冷卻中）", localCleaned)
+                onProcessingSuccess("⚡ Groq 直出（AI 冷卻中）", localCleaned, jobId)
             }
         } else {
             // If no Gemini API key is configured, perform local filtering and output directly
             val localCleaned = cleanFillerWordsLocally(rawText!!)
             Log.i(TAG, "===> [Stage 2 Direct]: \"$localCleaned\"")
-            onProcessingSuccess("⚡ Groq 直出", localCleaned)
+            onProcessingSuccess("⚡ Groq 直出", localCleaned, jobId)
         }
     }
 
@@ -573,7 +683,9 @@ class TypelessInputMethodService : InputMethodService() {
         }
     }
 
-    private fun onProcessingSuccess(sourceStatus: String, text: String) {
+    private fun onProcessingSuccess(sourceStatus: String, text: String, jobId: Long) {
+        if (jobId != activeProcessingJobId) return
+        isProcessing = false
         if (text.isNotBlank()) {
             vocabularyRepository.recordUsageAsync(text)
         }
@@ -590,7 +702,9 @@ class TypelessInputMethodService : InputMethodService() {
         }
     }
 
-    private fun onProcessingFailure(errorMsg: String) {
+    private fun onProcessingFailure(errorMsg: String, jobId: Long) {
+        if (jobId != activeProcessingJobId) return
+        isProcessing = false
         mainHandler.post {
             resetRecordButtonUi()
             tvStatus?.text = "錯誤：$errorMsg"
@@ -599,11 +713,15 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     private fun resetRecordButtonUi() {
+        isProcessing = false
+        isRecording = false
+        isSlidingToCancel = false
         btnRecord?.isEnabled = true
         btnRecord?.text = getString(R.string.btn_record_start)
         btnRecord?.backgroundTintList = ColorStateList.valueOf(
             ContextCompat.getColor(this, R.color.ime_primary)
         )
+        resetDeleteButtonUi()
     }
 
     private fun safeDelete(file: File) {

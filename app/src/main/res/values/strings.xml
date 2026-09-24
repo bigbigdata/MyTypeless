@@ -25,4 +25,9 @@
     <string name="desc_action_enter">換行或確認</string>
     <string name="desc_action_space">空白鍵</string>
     <string name="desc_delete">退格刪除</string>
+    <string name="desc_cancel">中斷並放棄錄音</string>
+    <string name="status_recording_tap">🎙️ 聆聽中... 再次點擊送出，或按 ✕ 中斷</string>
+    <string name="status_slide_to_cancel">⚠️ 鬆開手指即可放棄本次錄音</string>
+    <string name="btn_record_slide_to_cancel">❌ 鬆開取消錄音</string>
+    <string name="status_recording_aborted">已中斷並放棄本次錄音</string>
 </resources>
