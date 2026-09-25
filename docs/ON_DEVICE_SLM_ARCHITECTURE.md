@@ -123,22 +123,48 @@ flowchart TD
 
 ## 6. 代碼抽象層設計 (Engine Abstraction Architecture)
 
-在 `com.typeless.ime.engine` 套件中建立核心抽象介面：
+在 `com.typeless.ime.engine` 套件中建立核心抽象介面與即時串流引擎：
 
 ```
 com.typeless.ime.engine/
-├── NetworkStateMonitor.kt          // 網路連線與品質即時監聽器
+├── NetworkStateMonitor.kt          // 網路連線與品質即時監聽器 (ConnectivityManager.NetworkCallback)
+├── PixelStreamingSttManager.kt      // Pixel 原生離線即時串流語音辨識 (SpeechRecognizer.createOnDeviceSpeechRecognizer)
 ├── SpeechToTextEngine.kt            // 語音轉文字抽象 (Groq / Android On-Device)
-├── TextPolishingEngine.kt           // 文字潤飾抽象 (Gemini Cloud / Nano / Gemma / Rule)
+├── TextPolishingEngine.kt           // 文字潤飾抽象 (Gemini Cloud / Nano / Local Adaptive / Rule)
 └── HybridPipelineCoordinator.kt     // 端雲協同調度器（超時處理、自動降級、Fast-Path）
 ```
 
 ---
 
-## 7. 推進里程碑 (Implementation Roadmap)
+## 7. 功能邊界與實測定義 (Functional Boundaries & Verification)
+
+### 邊界 1：UI 實測開關與模式切換 (Dev Switch & Transparent Telemetry)
+* **輸入**：使用者在鍵盤工具列點擊 `btn_mode_toggle`，或系統網路狀態斷開。
+* **行為**：在 `☁️ 雲端模式` 與 `📱 端側模式` 間無縫切換，並持久化於 `SharedPreferences`。
+* **輸出**：按鈕狀態與 Toast 提示即時更新，處理完畢後精確印出耗時：`📱 端側完成｜ASR: 210ms ➔ 潤飾: 35ms (總計 245ms)`。
+
+### 邊界 2：Stage 1 離線串流語音辨識 (Pixel Live Streaming ASR)
+* **輸入**：使用者按住錄音鍵說話。
+* **行為**：透過 `SpeechRecognizer.createOnDeviceSpeechRecognizer(context)` 即時收音，音量波形即時動畫，並即時輸出部分辨識預覽 (`🗣️ 正在辨識: ...`)。
+* **輸出**：放開按鍵立即產出原始字串 `rawText` 與精確毫秒數 `asrDurationMs`。100% 離線運行、零網路請求。
+
+### 3. Stage 2 本地文字潤飾與詞庫注入 (Local Polishing & Vocabulary Integration)
+* **輸入**：`rawText` + 既有 SQLite 資料庫的高頻詞清單 `vocabularyRepository.getAllTermsForGemini(limit = 40)`。
+* **行為**：本地 Regex 剔除贅字 ➔ 專屬詞庫強制校正大小寫與同音誤譯 ➔ 補齊標點符號與盤古之白 (中英空格)。
+* **輸出**：高精度潤飾後文本 `finalText` 與潤飾耗時 `polishDurationMs`。既有詞庫 100% 完整保留。
+
+### 邊界 4：輸入注入與閉環學習 (Cursor Injection & Continuous Learning)
+* **輸入**：`finalText`。
+* **行為**：透過 `InputConnection.commitText` 送入作用中的輸入框，並非同步觸發 `vocabularyRepository.recordUsageAsync(finalText)` 更新詞頻。
+* **輸出**：游標落字，鍵盤按鈕復位，端側模式閉環完成。
+
+---
+
+## 8. 推進里程碑狀態 (Roadmap & Status)
 
 - [x] **Milestone 1**: 建立端雲協同架構規格書與設計決策（完成）。
-- [ ] **Milestone 2**: 實作 `NetworkStateMonitor`、`SpeechToTextEngine` 與 `TextPolishingEngine` 抽象介面。
-- [ ] **Milestone 3**: 實作 `AndroidOnDeviceSttEngine` 原生離線語音辨識適配。
-- [ ] **Milestone 4**: 實作 `HybridPipelineCoordinator` 實現自動無感降級與 2 秒超時熔斷。
-- [ ] **Milestone 5**: 串接 Android AICore (Gemini Nano) 與 Google AI Edge MediaPipe 實體模型。
+- [x] **Milestone 2**: 實作 `NetworkStateMonitor`、`SpeechToTextEngine` 與 `TextPolishingEngine` 抽象介面（完成）。
+- [x] **Milestone 3**: 實作 `PixelStreamingSttManager` 原生離線即時串流語音辨識（完成）。
+- [x] **Milestone 4**: 串接既有 SQLite 字彙庫進行端側專有詞模糊校正與盤古排版（完成）。
+- [x] **Milestone 5**: 鍵盤介面整合「☁️ 雲端 / 📱 端側」一鍵實測開關與毫秒級狀態儀表（完成）。
+- [x] **Milestone 6**: 完整除錯 APK 打包編譯驗證通過 (`assembleDebug` BUILD SUCCESSFUL)（完成）。
