@@ -27,6 +27,8 @@ import com.google.android.material.button.MaterialButton
 import com.typeless.ime.ai.GeminiAudioClient
 import com.typeless.ime.ai.GroqWhisperClient
 import com.typeless.ime.audio.AudioRecorderManager
+import com.typeless.ime.engine.HybridPipelineCoordinator
+import com.typeless.ime.engine.NetworkStateMonitor
 import com.typeless.ime.vocabulary.VocabularyRepository
 import java.io.File
 import kotlin.concurrent.thread
@@ -54,6 +56,8 @@ class TypelessInputMethodService : InputMethodService() {
     private lateinit var groqClient: GroqWhisperClient
     private lateinit var geminiClient: GeminiAudioClient
     private lateinit var vocabularyRepository: VocabularyRepository
+    private lateinit var networkMonitor: NetworkStateMonitor
+    private lateinit var hybridCoordinator: HybridPipelineCoordinator
 
     private var isRecording = false
     private var isProcessing = false
@@ -96,6 +100,15 @@ class TypelessInputMethodService : InputMethodService() {
         vocabularyRepository = VocabularyRepository.getInstance(this)
         groqClient = GroqWhisperClient { settingsManager.groqApiKey }
         geminiClient = GeminiAudioClient { settingsManager.apiKey }
+        networkMonitor = NetworkStateMonitor(this)
+        hybridCoordinator = HybridPipelineCoordinator(
+            context = this,
+            networkMonitor = networkMonitor,
+            settingsManager = settingsManager,
+            vocabularyRepository = vocabularyRepository,
+            groqClient = groqClient,
+            geminiClient = geminiClient
+        )
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -368,7 +381,7 @@ class TypelessInputMethodService : InputMethodService() {
                 wasRecordingAtDown = isRecording
 
                 if (!isRecording) {
-                    if (!settingsManager.hasGroqApiKey && !settingsManager.hasApiKey) {
+                    if (!settingsManager.hasGroqApiKey && !settingsManager.hasApiKey && networkMonitor.isOnline) {
                         Toast.makeText(this, "請先在設定中輸入 Groq 或 Gemini Key", Toast.LENGTH_SHORT).show()
                         openSettingsActivity()
                         return true
@@ -566,85 +579,25 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     /**
-     * Two-stage pipeline processing logic:
-     * Stage 1: Audio STT (Groq Whisper / Gemini Audio direct fallback)
-     * Stage 2: Text Polishing (Gemini LLM / Local Fast-Path filter)
+     * Two-stage pipeline processing delegated to HybridPipelineCoordinator
+     * (Coordinates cloud Whisper/Gemini with on-device fallback and circuit breakers).
      */
     private fun processAudioPipeline(audioFile: File, jobId: Long) {
-        var rawText: String? = null
-
-        // Query vocabulary bias
-        val dynamicWhisperPrompt = vocabularyRepository.buildWhisperPrompt()
-        val knownVocabulary = vocabularyRepository.getAllTermsForGemini()
-
-        // Stage 1: Speech-to-Text (STT) via Groq Whisper with dynamic vocabulary bias
-        if (settingsManager.hasGroqApiKey) {
-            updateStatusOnMain("⚡ Groq 轉錄中...")
-            val groqResult = groqClient.transcribe(audioFile, dynamicWhisperPrompt)
-            groqResult.onSuccess { text ->
-                if (text.isNotBlank()) {
-                    rawText = text
-                }
-            }.onFailure { err ->
-                Log.w(TAG, "Groq transcription failed: ${err.message}")
-            }
-        }
-
-        // Fallback: If no Groq Key is available or Groq STT fails, try direct Gemini multimodal transcription if Gemini Key is configured
-        if (rawText.isNullOrBlank() && settingsManager.hasApiKey) {
-            updateStatusOnMain("🤖 Gemini 直傳辨識中...")
-            val directResult = geminiClient.transcribeAndPolish(audioFile, settingsManager.model, knownVocabulary)
-            directResult.onSuccess { polished ->
-                safeDelete(audioFile)
-                onProcessingSuccess("🤖 Gemini 直傳完成", polished, jobId)
-                return
-            }.onFailure { err ->
-                Log.w(TAG, "Gemini direct audio transcription failed: ${err.message}")
-            }
-        }
+        val result = hybridCoordinator.process(
+            audioFile = audioFile,
+            jobId = jobId,
+            activeJobCheck = { jobId == activeProcessingJobId },
+            onStatusUpdate = { status -> updateStatusOnMain(status) }
+        )
 
         safeDelete(audioFile)
 
         if (jobId != activeProcessingJobId) return
 
-        if (rawText.isNullOrBlank()) {
-            onProcessingFailure("未偵測到清晰語音或轉錄失敗", jobId)
-            return
-        }
-
-        Log.i(TAG, "===> [Stage 1 STT Raw]: \"$rawText\"")
-
-        // Latency optimization: Fast-Path Skip for ultra-short affirmations.
-        // For common 1-4 character affirmations (e.g., "OK", "Sure", "Thanks", "No problem"),
-        // inject text directly locally to save 500ms+ cloud Gemini round-trip latency.
-        if (isFastPathCandidate(rawText!!)) {
-            val localCleaned = cleanFillerWordsLocally(rawText!!)
-            val formatted = applyPanguSpacing(localCleaned)
-            Log.i(TAG, "===> [Fast-Path Direct]: \"$formatted\"")
-            onProcessingSuccess("⚡ 極速直出 (Fast-Path)", formatted, jobId)
-            return
-        }
-
-        // Stage 2: Gemini text polishing and structuring with known vocabulary bias
-        if (settingsManager.hasApiKey) {
-            updateStatusOnMain("🤖 Gemini 潤飾中...")
-            val polishResult = geminiClient.polishText(rawText!!, settingsManager.model, knownVocabulary)
-            if (jobId != activeProcessingJobId) return
-            polishResult.onSuccess { polished ->
-                val textToInject = if (polished.isNotBlank()) polished else rawText!!
-                Log.i(TAG, "===> [Stage 2 Gemini Polished]: \"$textToInject\"")
-                onProcessingSuccess("⚡ Groq + 🤖 Gemini 潤飾完成", textToInject, jobId)
-            }.onFailure { err ->
-                Log.w(TAG, "Gemini polishing failed or rate limited (429), falling back to local output: ${err.message}")
-                val localCleaned = cleanFillerWordsLocally(rawText!!)
-                Log.i(TAG, "===> [Stage 2 Local Fallback]: \"$localCleaned\"")
-                onProcessingSuccess("⚡ Groq 直出（AI 冷卻中）", localCleaned, jobId)
-            }
-        } else {
-            // If no Gemini API key is configured, perform local filtering and output directly
-            val localCleaned = cleanFillerWordsLocally(rawText!!)
-            Log.i(TAG, "===> [Stage 2 Direct]: \"$localCleaned\"")
-            onProcessingSuccess("⚡ Groq 直出", localCleaned, jobId)
+        result.onSuccess { output ->
+            onProcessingSuccess(output.statusBadge, output.text, jobId)
+        }.onFailure { err ->
+            onProcessingFailure(err.message ?: "轉錄或整理失敗", jobId)
         }
     }
 
@@ -759,6 +712,7 @@ class TypelessInputMethodService : InputMethodService() {
 
     override fun onDestroy() {
         super.onDestroy()
+        networkMonitor.unregister()
         deleteHandler.removeCallbacks(deleteRunnable)
         spaceHandler.removeCallbacks(spaceRunnable)
         if (isRecording) {
