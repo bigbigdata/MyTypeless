@@ -26,8 +26,9 @@ class PixelStreamingSttManager(private val context: Context) {
 
     companion object {
         private const val TAG = "PixelStreamingStt"
-        private const val ERROR_LANGUAGE_UNAVAILABLE = 13
+        private const val ERROR_SERVER_DISCONNECTED = 11
         private const val ERROR_LANGUAGE_NOT_SUPPORTED = 12
+        private const val ERROR_LANGUAGE_UNAVAILABLE = 13
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -103,14 +104,17 @@ class PixelStreamingSttManager(private val context: Context) {
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-TW")
-                putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf("en-US", "cmn-Hant-TW", "zh-TW"))
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "zh-TW")
+                putExtra("android.speech.extra.LANGUAGE_TAG", "cmn-Hant-TW")
+                putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf("en-US", "zh-TW", "cmn-Hant-TW", "zh-HK"))
                 // Allow multilingual code-switching
                 putExtra("android.speech.extra.LANGUAGE_SWITCH_ALLOWED", true)
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                 putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
                 // Extend silence tolerance
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 5000L)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 10000L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 5000L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 1000L)
                 if (preferOffline) {
                     putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
                 }
@@ -150,20 +154,31 @@ class PixelStreamingSttManager(private val context: Context) {
                         return
                     }
 
-                    // If VAD detected silence timeout (error 7: NO_MATCH or error 6: SPEECH_TIMEOUT) while user is still recording,
-                    // do not abort! Re-arm recognizer to keep listening.
-                    if (isUserRecording && (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT)) {
-                        Log.d(TAG, "Pause detected while user is still recording. Re-arming recognizer...")
-                        mainHandler.post {
+                    // Silence timeout / pause disconnect while user is actively recording:
+                    // Error 6: ERROR_SPEECH_TIMEOUT (VAD detected silence)
+                    // Error 7: ERROR_NO_MATCH (No speech recognized in window)
+                    // Error 11: ERROR_SERVER_DISCONNECTED (RecognitionService session disconnected due to ~10s idle)
+                    // Error 8: ERROR_RECOGNIZER_BUSY (Temporarily busy during reconnect)
+                    val isSilenceTimeout = error == SpeechRecognizer.ERROR_NO_MATCH ||
+                            error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT ||
+                            error == ERROR_SERVER_DISCONNECTED ||
+                            error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY
+
+                    if (isUserRecording && isSilenceTimeout) {
+                        Log.d(TAG, "Pause/silence timeout detected (error $error) while user is still recording. Seamlessly re-arming...")
+                        stopAndDestroyRecognizer()
+                        val delayMs = if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) 300L else 150L
+                        mainHandler.postDelayed({
                             if (isUserRecording) {
                                 startListeningInternal(preferOffline = preferOffline)
                             }
-                        }
+                        }, delayMs)
                         return
                     }
 
-                    if (!isUserRecording && accumulatedTranscript.isNotEmpty()) {
-                        // User stopped and we have accumulated text; return it despite trailing error
+                    if (accumulatedTranscript.isNotEmpty()) {
+                        // User stopped or session errored with existing text; deliver accumulated transcript
+                        Log.i(TAG, "Delivering accumulated transcript despite error $error: $accumulatedTranscript")
                         deliverFinalResult()
                         return
                     }
@@ -176,8 +191,9 @@ class PixelStreamingSttManager(private val context: Context) {
 
                 override fun onResults(results: Bundle?) {
                     val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    val text = matches?.firstOrNull()?.trim().orEmpty()
-                    Log.i(TAG, "SpeechRecognizer segment onResults: \"$text\" (isUserRecording=$isUserRecording)")
+                    val rawText = matches?.firstOrNull()?.trim().orEmpty()
+                    val text = TraditionalChineseConverter.toTraditional(rawText)
+                    Log.i(TAG, "SpeechRecognizer segment onResults: \"$text\" (raw: \"$rawText\", isUserRecording=$isUserRecording)")
 
                     if (text.isNotBlank()) {
                         if (accumulatedTranscript.isNotEmpty() && !accumulatedTranscript.endsWith(" ")) {
@@ -201,7 +217,8 @@ class PixelStreamingSttManager(private val context: Context) {
 
                 override fun onPartialResults(partialResults: Bundle?) {
                     val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    val partialText = matches?.firstOrNull()?.trim().orEmpty()
+                    val rawPartial = matches?.firstOrNull()?.trim().orEmpty()
+                    val partialText = TraditionalChineseConverter.toTraditional(rawPartial)
                     if (partialText.isNotBlank()) {
                         val fullPreview = if (accumulatedTranscript.isNotEmpty()) {
                             "$accumulatedTranscript $partialText"
@@ -287,6 +304,7 @@ class PixelStreamingSttManager(private val context: Context) {
             SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "辨識引擎忙碌中"
             SpeechRecognizer.ERROR_SERVER -> "語音辨識服務異常"
             SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "未偵測到聲音"
+            ERROR_SERVER_DISCONNECTED -> "語音辨識連線逾時（請重試）"
             ERROR_LANGUAGE_UNAVAILABLE -> "手機尚未下載繁體中文離線語音包（可至手機「設定 ➔ 系統 ➔ 語言 ➔ 語音輸入」下載繁體中文）"
             ERROR_LANGUAGE_NOT_SUPPORTED -> "此裝置系統未支援該語系離線辨識"
             else -> "語音辨識錯誤 ($error)"

@@ -784,9 +784,10 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     private fun injectText(text: String) {
+        val traditionalText = com.typeless.ime.engine.TraditionalChineseConverter.toTraditional(text)
         val ic = currentInputConnection
         if (ic != null) {
-            ic.commitText(text, 1)
+            ic.commitText(traditionalText, 1)
         } else {
             Toast.makeText(this, "無法取得焦點輸入框", Toast.LENGTH_SHORT).show()
         }

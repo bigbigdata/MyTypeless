@@ -51,10 +51,10 @@ class RuleBasedPolishingEngine : TextPolishingEngine {
     private val fillerRegex = Regex("(^[，,。？?\\s]*(呃|啊|那個|就是說|然後其實|嗯)[，,。？?\\s]*)|([，,]\\s*(呃|啊|那個|就是說|嗯)\\s*)")
 
     override fun polish(rawText: String, knownVocabulary: List<String>): Result<String> {
-        val trimmed = rawText.trim()
-        val cleaned = trimmed.replace(fillerRegex, " ").trim()
+        val traditional = TraditionalChineseConverter.toTraditional(rawText.trim())
+        val cleaned = traditional.replace(fillerRegex, " ").trim()
         val formatted = applyPanguSpacing(cleaned)
-        return Result.success(formatted)
+        return Result.success(TraditionalChineseConverter.toTraditional(formatted))
     }
 
     private fun applyPanguSpacing(text: String): String {
@@ -119,8 +119,11 @@ class LocalAdaptivePolishingEngine(
     override fun polish(rawText: String, knownVocabulary: List<String>): Result<String> {
         Log.i(TAG, "Polishing with engine: $name (knownVocab size: ${knownVocabulary.size})")
 
+        // 0. Enforce Traditional Chinese on incoming raw text
+        val tradRaw = TraditionalChineseConverter.toTraditional(rawText)
+
         // 1. Pre-cleaning with regex to remove filler words ("呃", "那個", etc.)
-        val preCleaned = ruleEngine.polish(rawText, knownVocabulary).getOrDefault(rawText)
+        val preCleaned = ruleEngine.polish(tradRaw, knownVocabulary).getOrDefault(tradRaw)
 
         // 2. Vocabulary-Guided Restoration:
         // Scans for known technical terms/acronyms from user's custom SQLite dictionary.
@@ -143,6 +146,9 @@ class LocalAdaptivePolishingEngine(
             trimmed
         }
 
-        return Result.success(finalWithPunctuation)
+        // 4. Final assurance of 100% Traditional Chinese output
+        val finalTraditional = TraditionalChineseConverter.toTraditional(finalWithPunctuation)
+
+        return Result.success(finalTraditional)
     }
 }
