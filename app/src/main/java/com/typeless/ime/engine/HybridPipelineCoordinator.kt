@@ -55,7 +55,12 @@ class HybridPipelineCoordinator(
         { settingsManager.model },
         { settingsManager.hasApiKey }
     )
-    private val localAdaptiveEngine = LocalAdaptivePolishingEngine(context)
+    private val localAdaptiveEngine = LocalAdaptivePolishingEngine(
+        context = context,
+        geminiClient = geminiClient,
+        networkMonitor = networkMonitor,
+        settingsManager = settingsManager
+    )
     private val ruleEngine = RuleBasedPolishingEngine()
 
     /**

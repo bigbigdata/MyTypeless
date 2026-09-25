@@ -114,7 +114,12 @@ class TypelessInputMethodService : InputMethodService() {
         geminiClient = GeminiAudioClient { settingsManager.apiKey }
         networkMonitor = NetworkStateMonitor(this)
         pixelSttManager = PixelStreamingSttManager(this)
-        localPolishingEngine = LocalAdaptivePolishingEngine(this)
+        localPolishingEngine = LocalAdaptivePolishingEngine(
+            context = this,
+            geminiClient = geminiClient,
+            networkMonitor = networkMonitor,
+            settingsManager = settingsManager
+        )
         hybridCoordinator = HybridPipelineCoordinator(
             context = this,
             networkMonitor = networkMonitor,

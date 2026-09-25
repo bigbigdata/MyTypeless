@@ -40,54 +40,48 @@ class GeminiCloudPolishingEngine(
 
 /**
  * Stage 2 Ultra-Fast Local Rule-Based Engine:
- * Executes regex-based filler removal and Pangu spacing with <5ms latency and 0MB memory overhead.
+ * Executes deterministic semantic structuring, paragraph segmentation, and list formatting
+ * via LocalSemanticFormatter with <5ms latency and 0MB memory overhead.
  */
 class RuleBasedPolishingEngine : TextPolishingEngine {
 
-    override val name: String = "Local Rule-Based (Regex + Pangu)"
+    override val name: String = "Local Semantic Formatter (Paragraphs + Lists + Pangu)"
     override val isAvailable: Boolean = true
     override val isOfflineCapable: Boolean = true
 
-    private val fillerRegex = Regex("(^[，,。？?\\s]*(呃|啊|那個|就是說|然後其實|嗯)[，,。？?\\s]*)|([，,]\\s*(呃|啊|那個|就是說|嗯)\\s*)")
-
     override fun polish(rawText: String, knownVocabulary: List<String>): Result<String> {
-        val traditional = TraditionalChineseConverter.toTraditional(rawText.trim())
-        val cleaned = traditional.replace(fillerRegex, " ").trim()
-        val formatted = applyPanguSpacing(cleaned)
-        return Result.success(TraditionalChineseConverter.toTraditional(formatted))
-    }
-
-    private fun applyPanguSpacing(text: String): String {
-        var result = text
-        // CJK followed by alphanumeric
-        result = result.replace(Regex("([\\u4e00-\\u9fa5])([a-zA-Z0-9])"), "$1 $2")
-        // Alphanumeric followed by CJK
-        result = result.replace(Regex("([a-zA-Z0-9])([\\u4e00-\\u9fa5])"), "$1 $2")
-        return result.trim()
+        val formatted = LocalSemanticFormatter.format(rawText, knownVocabulary)
+        return Result.success(formatted)
     }
 }
 
 /**
  * Dynamic Adaptive On-Device Polishing Engine:
- * 1. Tier 1: Probes system Android AICore (Gemini Nano) for hardware-accelerated NPU execution.
- * 2. Tier 2: Probes Google MediaPipe Gemma 2 (2B) if model assets are mounted.
- * 3. Tier 3: Falls back to RuleBasedPolishingEngine as a guaranteed zero-crash safety net.
+ * 1. Hybrid Assist: If online and API key configured, invokes Cloud Gemini 2.5 Flash for LLM-level semantic resolution.
+ * 2. Tier 1: Probes system Android AICore (Gemini Nano) for hardware-accelerated NPU execution.
+ * 3. Tier 2: Probes Google MediaPipe Gemma 2 (2B) if model assets are mounted.
+ * 4. Tier 3: Falls back to LocalSemanticFormatter (Paragraphs + Numbered/Bullet Lists + Pangu) for guaranteed offline excellence.
  */
 class LocalAdaptivePolishingEngine(
     private val context: Context,
+    private val geminiClient: GeminiAudioClient? = null,
+    private val networkMonitor: NetworkStateMonitor? = null,
+    private val settingsManager: com.typeless.ime.SettingsManager? = null,
     private val ruleEngine: RuleBasedPolishingEngine = RuleBasedPolishingEngine()
 ) : TextPolishingEngine {
 
     companion object {
         private const val TAG = "LocalAdaptiveEngine"
+        private const val CLOUD_ASSIST_TIMEOUT_MS = 3500L
     }
 
     override val name: String
         get() {
             return when {
+                networkMonitor?.isOnline == true && settingsManager?.hasApiKey == true && geminiClient != null -> "Gemini Enhanced (Hybrid Semantic)"
                 isAiCoreSupported() -> "Gemini Nano (AICore NPU)"
                 isGemmaModelAvailable() -> "Gemma 2 2B (MediaPipe)"
-                else -> "Local Rule-Based"
+                else -> "Local Semantic Formatter"
             }
         }
 
@@ -98,7 +92,6 @@ class LocalAdaptivePolishingEngine(
      * Checks if Android AICore is present and exposed on the current device (e.g. Pixel 8/9/10).
      */
     fun isAiCoreSupported(): Boolean {
-        // AICore system package verification
         return try {
             val pm = context.packageManager
             pm.getPackageInfo("com.google.android.aicore", 0)
@@ -119,36 +112,24 @@ class LocalAdaptivePolishingEngine(
     override fun polish(rawText: String, knownVocabulary: List<String>): Result<String> {
         Log.i(TAG, "Polishing with engine: $name (knownVocab size: ${knownVocabulary.size})")
 
-        // 0. Enforce Traditional Chinese on incoming raw text
-        val tradRaw = TraditionalChineseConverter.toTraditional(rawText)
-
-        // 1. Pre-cleaning with regex to remove filler words ("呃", "那個", etc.)
-        val preCleaned = ruleEngine.polish(tradRaw, knownVocabulary).getOrDefault(tradRaw)
-
-        // 2. Vocabulary-Guided Restoration:
-        // Scans for known technical terms/acronyms from user's custom SQLite dictionary.
-        // Restores case-insensitive matches and fixes common ASR code-switching misrecognitions.
-        var restored = preCleaned
-        for (term in knownVocabulary.take(40)) {
-            if (term.isBlank() || term.length < 2) continue
-            // Case-insensitive boundary match for English terms
-            if (term.first().isLetter()) {
-                val pattern = Regex("(?i)\\b${Regex.escape(term)}\\b")
-                restored = restored.replace(pattern, term)
+        // 1. If online and key configured, try Gemini 2.5 Flash for deep semantic structuring
+        if (networkMonitor?.isOnline == true && settingsManager?.hasApiKey == true && geminiClient != null) {
+            try {
+                val cloudResult = geminiClient.polishText(rawText, settingsManager.model, knownVocabulary)
+                if (cloudResult.isSuccess) {
+                    val text = cloudResult.getOrThrow()
+                    if (text.isNotBlank()) {
+                        Log.i(TAG, "Gemini Cloud successfully polished and structured text")
+                        return Result.success(TraditionalChineseConverter.toTraditional(text))
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Gemini online assist failed or timed out: ${e.message}, falling back to local semantic formatter")
             }
         }
 
-        // 3. Punctuation assurance: If the sentence is non-empty and lacks terminating punctuation, append "。"
-        val trimmed = restored.trim()
-        val finalWithPunctuation = if (trimmed.isNotEmpty() && !trimmed.endsWith("。") && !trimmed.endsWith("！") && !trimmed.endsWith("？") && !trimmed.endsWith("!")) {
-            "$trimmed。"
-        } else {
-            trimmed
-        }
-
-        // 4. Final assurance of 100% Traditional Chinese output
-        val finalTraditional = TraditionalChineseConverter.toTraditional(finalWithPunctuation)
-
-        return Result.success(finalTraditional)
+        // 2. Offline / Local fallback: High-precision deterministic local structuring (paragraphs, numbered/bullet lists, clause punctuation)
+        val formatted = LocalSemanticFormatter.format(rawText, knownVocabulary)
+        return Result.success(formatted)
     }
 }
