@@ -14,8 +14,13 @@ import android.util.Log
 /**
  * PixelStreamingSttManager
  * 
- * Manages live-streaming Speech-to-Text recognition using Android's SpeechRecognizer.
- * Supports on-device offline models with graceful auto-recovery when offline voice packs are missing.
+ * Manages live audio streaming Speech-to-Text recognition using Android's SpeechRecognizer.
+ * 
+ * Key Features for Tap-to-Toggle Mode:
+ * 1. Multi-segment Speech Accumulation: When user pauses, system VAD does NOT cut off the input.
+ *    Segments are accumulated seamlessly until the user explicitly taps Stop.
+ * 2. Bilingual Code-Switching: Configured with multilingual intents (zh-TW + en-US).
+ * 3. Graceful Auto-Recovery: Automatically falls back if offline voice packs are missing.
  */
 class PixelStreamingSttManager(private val context: Context) {
 
@@ -27,9 +32,19 @@ class PixelStreamingSttManager(private val context: Context) {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var speechRecognizer: SpeechRecognizer? = null
-    private var isListening = false
+
+    @Volatile
+    private var isUserRecording = false
     private var startTimeMs = 0L
     private var hasRetriedWithStandard = false
+
+    private val accumulatedTranscript = StringBuilder()
+
+    // Callbacks held during active session
+    private var cbRmsChanged: ((Float) -> Unit)? = null
+    private var cbPartialResult: ((String) -> Unit)? = null
+    private var cbFinalResult: ((String, Long) -> Unit)? = null
+    private var cbError: ((String) -> Unit)? = null
 
     val isAvailable: Boolean
         get() {
@@ -42,7 +57,8 @@ class PixelStreamingSttManager(private val context: Context) {
         }
 
     /**
-     * Starts live audio streaming recognition with auto-fallback.
+     * Starts listening for user speech in Tap-to-Toggle mode.
+     * Keeps accumulating speech until stopListeningByUser() is called.
      */
     fun startListening(
         onRmsChanged: (Float) -> Unit,
@@ -51,32 +67,27 @@ class PixelStreamingSttManager(private val context: Context) {
         onError: (errorMessage: String) -> Unit
     ): Boolean {
         hasRetriedWithStandard = false
-        return startListeningInternal(
-            preferOffline = true,
-            onRmsChanged = onRmsChanged,
-            onPartialResult = onPartialResult,
-            onFinalResult = onFinalResult,
-            onError = onError
-        )
+        isUserRecording = true
+        startTimeMs = System.currentTimeMillis()
+        accumulatedTranscript.clear()
+
+        cbRmsChanged = onRmsChanged
+        cbPartialResult = onPartialResult
+        cbFinalResult = onFinalResult
+        cbError = onError
+
+        return startListeningInternal(preferOffline = true)
     }
 
-    private fun startListeningInternal(
-        preferOffline: Boolean,
-        onRmsChanged: (Float) -> Unit,
-        onPartialResult: (String) -> Unit,
-        onFinalResult: (transcript: String, asrDurationMs: Long) -> Unit,
-        onError: (errorMessage: String) -> Unit
-    ): Boolean {
+    private fun startListeningInternal(preferOffline: Boolean): Boolean {
         if (!isAvailable) {
-            onError("此裝置系統語音服務尚未就緒")
+            cbError?.invoke("此裝置系統語音服務尚未就緒")
             return false
         }
 
         stopAndDestroyRecognizer()
 
         try {
-            startTimeMs = System.currentTimeMillis()
-
             val recognizer = if (preferOffline && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
                 SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
             ) {
@@ -92,17 +103,22 @@ class PixelStreamingSttManager(private val context: Context) {
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-TW")
-                putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf("zh-TW", "en-US", "cmn-Hant-TW"))
+                putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf("en-US", "cmn-Hant-TW", "zh-TW"))
+                // Allow multilingual code-switching
+                putExtra("android.speech.extra.LANGUAGE_SWITCH_ALLOWED", true)
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+                // Extend silence tolerance
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 5000L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
                 if (preferOffline) {
                     putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
                 }
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
             }
 
             recognizer.setRecognitionListener(object : RecognitionListener {
                 override fun onReadyForSpeech(params: Bundle?) {
-                    Log.d(TAG, "SpeechRecognizer is ready for speech")
+                    Log.d(TAG, "SpeechRecognizer ready for speech")
                 }
 
                 override fun onBeginningOfSpeech() {
@@ -110,60 +126,89 @@ class PixelStreamingSttManager(private val context: Context) {
                 }
 
                 override fun onRmsChanged(rmsdB: Float) {
-                    onRmsChanged(rmsdB)
+                    cbRmsChanged?.invoke(rmsdB)
                 }
 
                 override fun onBufferReceived(buffer: ByteArray?) {}
 
                 override fun onEndOfSpeech() {
-                    Log.d(TAG, "Speech end detected")
+                    Log.d(TAG, "Speech segment end detected by VAD")
                 }
 
                 override fun onError(error: Int) {
-                    isListening = false
-                    Log.w(TAG, "SpeechRecognizer onError: $error (hasRetried=$hasRetriedWithStandard, preferOffline=$preferOffline)")
+                    Log.w(TAG, "SpeechRecognizer onError: $error (isUserRecording=$isUserRecording, preferOffline=$preferOffline)")
 
-                    // If error is 13 (Language unavailable for offline) or 12, retry with standard recognizer
+                    // Auto-recovery for Error 13 (Language unavailable) or Error 12
                     if ((error == ERROR_LANGUAGE_UNAVAILABLE || error == ERROR_LANGUAGE_NOT_SUPPORTED) && !hasRetriedWithStandard) {
                         Log.i(TAG, "Offline pack for zh-TW missing (error $error), auto-recovering with system speech service...")
                         hasRetriedWithStandard = true
                         mainHandler.post {
-                            startListeningInternal(
-                                preferOffline = false,
-                                onRmsChanged = onRmsChanged,
-                                onPartialResult = onPartialResult,
-                                onFinalResult = onFinalResult,
-                                onError = onError
-                            )
+                            if (isUserRecording) {
+                                startListeningInternal(preferOffline = false)
+                            }
                         }
                         return
                     }
 
+                    // If VAD detected silence timeout (error 7: NO_MATCH or error 6: SPEECH_TIMEOUT) while user is still recording,
+                    // do not abort! Re-arm recognizer to keep listening.
+                    if (isUserRecording && (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT)) {
+                        Log.d(TAG, "Pause detected while user is still recording. Re-arming recognizer...")
+                        mainHandler.post {
+                            if (isUserRecording) {
+                                startListeningInternal(preferOffline = preferOffline)
+                            }
+                        }
+                        return
+                    }
+
+                    if (!isUserRecording && accumulatedTranscript.isNotEmpty()) {
+                        // User stopped and we have accumulated text; return it despite trailing error
+                        deliverFinalResult()
+                        return
+                    }
+
                     val errorMsg = mapErrorCodeToMessage(error)
-                    onError(errorMsg)
+                    isUserRecording = false
+                    cbError?.invoke(errorMsg)
                     stopAndDestroyRecognizer()
                 }
 
                 override fun onResults(results: Bundle?) {
-                    isListening = false
-                    val elapsed = System.currentTimeMillis() - startTimeMs
                     val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     val text = matches?.firstOrNull()?.trim().orEmpty()
-                    Log.i(TAG, "SpeechRecognizer onResults: \"$text\" in ${elapsed}ms")
+                    Log.i(TAG, "SpeechRecognizer segment onResults: \"$text\" (isUserRecording=$isUserRecording)")
 
                     if (text.isNotBlank()) {
-                        onFinalResult(text, elapsed)
-                    } else {
-                        onError("未偵測到清晰文字")
+                        if (accumulatedTranscript.isNotEmpty() && !accumulatedTranscript.endsWith(" ")) {
+                            accumulatedTranscript.append(" ")
+                        }
+                        accumulatedTranscript.append(text)
                     }
-                    stopAndDestroyRecognizer()
+
+                    if (isUserRecording) {
+                        // User is STILL recording! Continue listening for the next phrase
+                        mainHandler.post {
+                            if (isUserRecording) {
+                                startListeningInternal(preferOffline = preferOffline)
+                            }
+                        }
+                    } else {
+                        // User has tapped stop! Deliver full result
+                        deliverFinalResult()
+                    }
                 }
 
                 override fun onPartialResults(partialResults: Bundle?) {
                     val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     val partialText = matches?.firstOrNull()?.trim().orEmpty()
                     if (partialText.isNotBlank()) {
-                        onPartialResult(partialText)
+                        val fullPreview = if (accumulatedTranscript.isNotEmpty()) {
+                            "$accumulatedTranscript $partialText"
+                        } else {
+                            partialText
+                        }
+                        cbPartialResult?.invoke(fullPreview)
                     }
                 }
 
@@ -171,35 +216,53 @@ class PixelStreamingSttManager(private val context: Context) {
             })
 
             recognizer.startListening(intent)
-            isListening = true
             return true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start listening: ${e.message}", e)
-            isListening = false
-            onError("啟動原生語音辨識失敗: ${e.message}")
+            isUserRecording = false
+            cbError?.invoke("啟動語音辨識失敗: ${e.message}")
             stopAndDestroyRecognizer()
             return false
         }
     }
 
     /**
-     * Stops listening and requests final speech recognition result.
+     * User explicitly taps the Stop button to finish recording.
      */
-    fun stopListening() {
-        if (isListening) {
+    fun stopListeningByUser() {
+        Log.i(TAG, "User explicitly tapped stop. Finalizing accumulated transcript...")
+        isUserRecording = false
+        if (speechRecognizer != null) {
             try {
                 speechRecognizer?.stopListening()
             } catch (e: Exception) {
                 Log.w(TAG, "Error stopping SpeechRecognizer: ${e.message}")
+                deliverFinalResult()
             }
+        } else {
+            deliverFinalResult()
         }
+    }
+
+    private fun deliverFinalResult() {
+        val finalTranscript = accumulatedTranscript.toString().trim()
+        val elapsed = System.currentTimeMillis() - startTimeMs
+        Log.i(TAG, "Delivering final accumulated transcript: \"$finalTranscript\" in ${elapsed}ms")
+
+        if (finalTranscript.isNotBlank()) {
+            cbFinalResult?.invoke(finalTranscript, elapsed)
+        } else {
+            cbError?.invoke("未偵測到清晰說話內容")
+        }
+        stopAndDestroyRecognizer()
     }
 
     /**
      * Cancels active recognition immediately and discards audio.
      */
     fun cancel() {
-        isListening = false
+        isUserRecording = false
+        accumulatedTranscript.clear()
         try {
             speechRecognizer?.cancel()
         } catch (_: Exception) {}
@@ -207,7 +270,6 @@ class PixelStreamingSttManager(private val context: Context) {
     }
 
     private fun stopAndDestroyRecognizer() {
-        isListening = false
         try {
             speechRecognizer?.destroy()
         } catch (_: Exception) {}

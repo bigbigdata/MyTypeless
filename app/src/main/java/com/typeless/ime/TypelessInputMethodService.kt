@@ -98,6 +98,13 @@ class TypelessInputMethodService : InputMethodService() {
         }
     }
 
+    private val safetyTimeoutRunnable = Runnable {
+        if (isRecording) {
+            Toast.makeText(this@TypelessInputMethodService, "已達最大 60 秒錄音保護上限，自動送出", Toast.LENGTH_SHORT).show()
+            stopRecordingFlow()
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         audioRecorderManager = AudioRecorderManager(this)
@@ -159,9 +166,9 @@ class TypelessInputMethodService : InputMethodService() {
             handleActionButton()
         }
 
-        // Bind voice recording touch gestures
-        btnRecord?.setOnTouchListener { _, event ->
-            handleRecordTouch(event)
+        // Bind voice recording toggle click (Pure Tap-to-Toggle mode)
+        btnRecord?.setOnClickListener {
+            handleRecordToggleClick()
         }
 
         // Bind space key (single-tap space, long-press continuous space)
@@ -384,113 +391,51 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     /**
-     * Handles recording touch gestures:
-     * - Hold to talk: press to speak, release to submit, slide up to cancel.
-     * - Tap to toggle: tap to start, tap again to submit, tap cancel button to abort.
+     * Handles Pure Tap-to-Toggle recording:
+     * - Tap to start recording (runs until user explicitly taps again or 60s timeout).
+     * - Tap again to stop and submit.
      */
-    private fun handleRecordTouch(event: MotionEvent): Boolean {
-        when (event.action) {
-            MotionEvent.ACTION_DOWN -> {
-                touchDownTime = System.currentTimeMillis()
-                touchDownY = event.rawY
-                touchDownX = event.rawX
-                isSlidingToCancel = false
-                wasRecordingAtDown = isRecording
+    private fun handleRecordToggleClick() {
+        if (isProcessing) return
 
-                if (!isRecording) {
-                    val isDeviceMode = settingsManager.isForcedOfflineMode || !networkMonitor.isOnline
-                    if (!isDeviceMode && !settingsManager.hasGroqApiKey && !settingsManager.hasApiKey) {
-                        Toast.makeText(this, "請先在設定中輸入 Groq 或 Gemini Key", Toast.LENGTH_SHORT).show()
-                        openSettingsActivity()
-                        return true
-                    }
-
-                    if (!isDeviceMode) {
-                        // Pre-warm connection pool asynchronously to eliminate TLS handshake latency
-                        groqClient.prewarmConnection()
-                        geminiClient.prewarmConnection()
-                    }
-
-                    triggerHapticFeedback(45)
-
-                    PermissionActivity.requestRecordAudio(this) { granted ->
-                        if (granted) {
-                            if (isDeviceMode) {
-                                startOnDeviceRecordingFlow()
-                            } else {
-                                startRecordingFlow()
-                            }
-                        } else {
-                            tvStatus?.text = "未授權麥克風，無法進行語音輸入"
-                            Toast.makeText(this, "請允許麥克風權限以使用語音輸入", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                } else {
-                    triggerHapticFeedback(55)
-                }
-                return true
+        if (!isRecording) {
+            val isDeviceMode = settingsManager.isForcedOfflineMode || !networkMonitor.isOnline
+            if (!isDeviceMode && !settingsManager.hasGroqApiKey && !settingsManager.hasApiKey) {
+                Toast.makeText(this, "請先在設定中輸入 Groq 或 Gemini Key", Toast.LENGTH_SHORT).show()
+                openSettingsActivity()
+                return
             }
 
-            MotionEvent.ACTION_MOVE -> {
-                if (isRecording && !wasRecordingAtDown) {
-                    val deltaY = touchDownY - event.rawY
-                    if (deltaY > 100f) {
-                        if (!isSlidingToCancel) {
-                            isSlidingToCancel = true
-                            triggerHapticFeedback(50)
-                            btnRecord?.text = getString(R.string.btn_record_slide_to_cancel)
-                            btnRecord?.backgroundTintList = ColorStateList.valueOf(
-                                ContextCompat.getColor(this, R.color.ime_card)
-                            )
-                            tvStatus?.text = getString(R.string.status_slide_to_cancel)
-                        }
-                    } else if (deltaY < 50f) {
-                        if (isSlidingToCancel) {
-                            isSlidingToCancel = false
-                            triggerHapticFeedback(30)
-                            btnRecord?.text = getString(R.string.btn_record_stop)
-                            btnRecord?.backgroundTintList = ColorStateList.valueOf(
-                                ContextCompat.getColor(this, R.color.ime_recording)
-                            )
-                            tvStatus?.text = getString(R.string.status_recording)
-                        }
-                    }
-                }
-                return true
+            if (!isDeviceMode) {
+                groqClient.prewarmConnection()
+                geminiClient.prewarmConnection()
             }
 
-            MotionEvent.ACTION_UP -> {
-                val pressDuration = System.currentTimeMillis() - touchDownTime
+            triggerHapticFeedback(45)
 
-                if (isSlidingToCancel) {
-                    isSlidingToCancel = false
-                    abortRecordingFlow(getString(R.string.status_recording_aborted))
-                    return true
-                }
-
-                if (wasRecordingAtDown) {
-                    stopRecordingFlow()
-                } else {
-                    if (pressDuration >= 400L) {
-                        stopRecordingFlow()
+            PermissionActivity.requestRecordAudio(this) { granted ->
+                if (granted) {
+                    if (isDeviceMode) {
+                        startOnDeviceRecordingFlow()
                     } else {
-                        tvStatus?.text = getString(R.string.status_recording_tap)
+                        startRecordingFlow()
                     }
+                } else {
+                    tvStatus?.text = "未授權麥克風，無法進行語音輸入"
+                    Toast.makeText(this, "請允許麥克風權限以使用語音輸入", Toast.LENGTH_SHORT).show()
                 }
-                return true
             }
-
-            MotionEvent.ACTION_CANCEL -> {
-                if (isSlidingToCancel || (!wasRecordingAtDown && isRecording)) {
-                    abortRecordingFlow(getString(R.string.status_recording_aborted))
-                }
-                return true
-            }
+        } else {
+            // Already recording -> User clicked stop to finalize speech!
+            triggerHapticFeedback(65)
+            stopRecordingFlow()
         }
-        return false
     }
 
     private fun startRecordingFlow() {
+        mainHandler.removeCallbacks(safetyTimeoutRunnable)
+        mainHandler.postDelayed(safetyTimeoutRunnable, 60_000L)
+
         val success = audioRecorderManager.startRecording(
             onAmplitude = { amplitude ->
                 pbAudioLevel?.post {
@@ -524,6 +469,7 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     private fun stopRecordingFlow() {
+        mainHandler.removeCallbacks(safetyTimeoutRunnable)
         val isDeviceMode = settingsManager.isForcedOfflineMode || !networkMonitor.isOnline
         if (isDeviceMode) {
             stopOnDeviceRecordingFlow()
@@ -532,7 +478,6 @@ class TypelessInputMethodService : InputMethodService() {
 
         val audioFile: File? = audioRecorderManager.stopRecording()
         isRecording = false
-        isSlidingToCancel = false
         triggerHapticFeedback(65)
 
         pbAudioLevel?.visibility = View.INVISIBLE
@@ -560,6 +505,9 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     private fun startOnDeviceRecordingFlow() {
+        mainHandler.removeCallbacks(safetyTimeoutRunnable)
+        mainHandler.postDelayed(safetyTimeoutRunnable, 60_000L)
+
         val jobId = ++activeProcessingJobId
         val started = pixelSttManager.startListening(
             onRmsChanged = { rmsdB ->
@@ -588,7 +536,7 @@ class TypelessInputMethodService : InputMethodService() {
         if (started) {
             isRecording = true
             isSlidingToCancel = false
-            tvStatus?.text = "📱 Pixel 離線語音聆聽中..."
+            tvStatus?.text = "🎙️ 聆聽中... 說完整句後請點擊送出"
             pbAudioLevel?.visibility = View.VISIBLE
             btnRecord?.text = getString(R.string.btn_record_stop)
             btnRecord?.backgroundTintList = ColorStateList.valueOf(
@@ -602,8 +550,8 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     private fun stopOnDeviceRecordingFlow() {
+        mainHandler.removeCallbacks(safetyTimeoutRunnable)
         isRecording = false
-        isSlidingToCancel = false
         triggerHapticFeedback(65)
         pbAudioLevel?.visibility = View.INVISIBLE
         pbAudioLevel?.progress = 0
@@ -616,7 +564,7 @@ class TypelessInputMethodService : InputMethodService() {
         )
         updateDeleteButtonToCancelMode()
 
-        pixelSttManager.stopListening()
+        pixelSttManager.stopListeningByUser()
     }
 
     private fun processOnDeviceStage2(rawText: String, asrDurationMs: Long, jobId: Long) {
@@ -665,6 +613,7 @@ class TypelessInputMethodService : InputMethodService() {
      * Aborts and discards the active audio recording without transcription.
      */
     private fun abortRecordingFlow(statusMessage: String = "已中斷並放棄本次錄音") {
+        mainHandler.removeCallbacks(safetyTimeoutRunnable)
         isRecording = false
         isSlidingToCancel = false
         audioRecorderManager.cancelRecording()
@@ -845,6 +794,7 @@ class TypelessInputMethodService : InputMethodService() {
 
     override fun onDestroy() {
         super.onDestroy()
+        mainHandler.removeCallbacks(safetyTimeoutRunnable)
         networkMonitor.unregister()
         pixelSttManager.cancel()
         deleteHandler.removeCallbacks(deleteRunnable)

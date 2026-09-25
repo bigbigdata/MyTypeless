@@ -5,11 +5,11 @@
     <string name="subtype_zh_tw">MyTypeless 語音 (繁體/英文)</string>
     <string name="ime_banner_title">MyTypeless</string>
     <string name="btn_switch_keyboard">切換鍵盤</string>
-    <string name="status_idle">按住說話（放開送出）或 點一下開始</string>
-    <string name="status_recording">🎙️ 聆聽中... 說完放開即可送出</string>
-    <string name="status_polishing">🤖 Gemini 繁體潤飾中...</string>
-    <string name="btn_record_start">🎙️ 按住或點擊說話</string>
-    <string name="btn_record_stop">⏹️ 說完送出</string>
+    <string name="status_idle">點擊按鈕開始說話（說完再點一次送出）</string>
+    <string name="status_recording">🎙️ 聆聽中... 說完整句後請點擊送出</string>
+    <string name="status_polishing">🤖 繁體潤飾排版中...</string>
+    <string name="btn_record_start">🎙️ 點擊開始說話</string>
+    <string name="btn_record_stop">🛑 說完點擊送出</string>
     <string name="action_search">🔍</string>
     <string name="action_send">送出</string>
     <string name="action_go">前往</string>
