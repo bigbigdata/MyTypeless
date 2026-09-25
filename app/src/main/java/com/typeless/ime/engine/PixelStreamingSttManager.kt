@@ -146,28 +146,32 @@ class PixelStreamingSttManager(private val context: Context) {
                     if ((error == ERROR_LANGUAGE_UNAVAILABLE || error == ERROR_LANGUAGE_NOT_SUPPORTED) && !hasRetriedWithStandard) {
                         Log.i(TAG, "Offline pack for zh-TW missing (error $error), auto-recovering with system speech service...")
                         hasRetriedWithStandard = true
-                        mainHandler.post {
+                        mainHandler.postDelayed({
                             if (isUserRecording) {
                                 startListeningInternal(preferOffline = false)
                             }
-                        }
+                        }, 200L)
                         return
                     }
 
-                    // Silence timeout / pause disconnect while user is actively recording:
-                    // Error 6: ERROR_SPEECH_TIMEOUT (VAD detected silence)
-                    // Error 7: ERROR_NO_MATCH (No speech recognized in window)
-                    // Error 11: ERROR_SERVER_DISCONNECTED (RecognitionService session disconnected due to ~10s idle)
-                    // Error 8: ERROR_RECOGNIZER_BUSY (Temporarily busy during reconnect)
-                    val isSilenceTimeout = error == SpeechRecognizer.ERROR_NO_MATCH ||
-                            error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT ||
-                            error == ERROR_SERVER_DISCONNECTED ||
-                            error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY
+                    if (isUserRecording) {
+                        // While the user is still recording in Tap-to-Toggle mode, do NOT abort and do NOT deliver!
+                        // Transient errors (such as pause timeouts 6 & 7, server disconnect 11, recognizer busy 8, or client reset 5)
+                        // are handled by seamlessly re-arming the recognizer.
+                        if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                            isUserRecording = false
+                            cbError?.invoke("缺少麥克風權限")
+                            stopAndDestroyRecognizer()
+                            return
+                        }
 
-                    if (isUserRecording && isSilenceTimeout) {
-                        Log.d(TAG, "Pause/silence timeout detected (error $error) while user is still recording. Seamlessly re-arming...")
+                        Log.d(TAG, "Transient pause/reset (error $error) while user is still recording. Re-arming listener...")
                         stopAndDestroyRecognizer()
-                        val delayMs = if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) 300L else 150L
+                        val delayMs = when (error) {
+                            SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> 350L
+                            SpeechRecognizer.ERROR_CLIENT -> 250L
+                            else -> 150L
+                        }
                         mainHandler.postDelayed({
                             if (isUserRecording) {
                                 startListeningInternal(preferOffline = preferOffline)
@@ -176,15 +180,14 @@ class PixelStreamingSttManager(private val context: Context) {
                         return
                     }
 
+                    // ONLY when user is NO LONGER recording (!isUserRecording):
                     if (accumulatedTranscript.isNotEmpty()) {
-                        // User stopped or session errored with existing text; deliver accumulated transcript
-                        Log.i(TAG, "Delivering accumulated transcript despite error $error: $accumulatedTranscript")
+                        Log.i(TAG, "User finished recording. Delivering accumulated transcript: $accumulatedTranscript")
                         deliverFinalResult()
                         return
                     }
 
                     val errorMsg = mapErrorCodeToMessage(error)
-                    isUserRecording = false
                     cbError?.invoke(errorMsg)
                     stopAndDestroyRecognizer()
                 }
@@ -200,17 +203,20 @@ class PixelStreamingSttManager(private val context: Context) {
                             accumulatedTranscript.append(" ")
                         }
                         accumulatedTranscript.append(text)
+                        // Keep live preview updated with the full accumulated transcript
+                        cbPartialResult?.invoke(accumulatedTranscript.toString())
                     }
 
                     if (isUserRecording) {
                         // User is STILL recording! Continue listening for the next phrase
-                        mainHandler.post {
+                        stopAndDestroyRecognizer()
+                        mainHandler.postDelayed({
                             if (isUserRecording) {
                                 startListeningInternal(preferOffline = preferOffline)
                             }
-                        }
+                        }, 200L)
                     } else {
-                        // User has tapped stop! Deliver full result
+                        // User has explicitly tapped stop! Deliver full result
                         deliverFinalResult()
                     }
                 }
@@ -252,6 +258,12 @@ class PixelStreamingSttManager(private val context: Context) {
         if (speechRecognizer != null) {
             try {
                 speechRecognizer?.stopListening()
+                mainHandler.postDelayed({
+                    if (speechRecognizer != null) {
+                        Log.i(TAG, "Stop timeout reached, finalizing immediately.")
+                        deliverFinalResult()
+                    }
+                }, 1000L)
             } catch (e: Exception) {
                 Log.w(TAG, "Error stopping SpeechRecognizer: ${e.message}")
                 deliverFinalResult()
@@ -262,6 +274,7 @@ class PixelStreamingSttManager(private val context: Context) {
     }
 
     private fun deliverFinalResult() {
+        isUserRecording = false
         val finalTranscript = accumulatedTranscript.toString().trim()
         val elapsed = System.currentTimeMillis() - startTimeMs
         Log.i(TAG, "Delivering final accumulated transcript: \"$finalTranscript\" in ${elapsed}ms")
