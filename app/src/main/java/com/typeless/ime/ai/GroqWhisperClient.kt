@@ -87,6 +87,7 @@ class GroqWhisperClient(private val apiKeyProvider: () -> String?) {
                 .addFormDataPart("model", MODEL_NAME)
                 .addFormDataPart("response_format", "json")
                 .addFormDataPart("temperature", "0.0")
+                .addFormDataPart("language", "zh")
                 .addFormDataPart("prompt", promptToUse)
                 .build()
 

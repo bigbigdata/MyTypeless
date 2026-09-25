@@ -14,28 +14,22 @@ import android.util.Log
 /**
  * PixelStreamingSttManager
  * 
- * Manages live-streaming on-device Speech-to-Text recognition using Android's native
- * SpeechRecognizer (createOnDeviceSpeechRecognizer on API 31+ / Pixel devices).
- * 
- * Boundary Specifications:
- * - Input: Real-time microphone audio captured while user holds the record key.
- * - Callbacks:
- *   - onRmsChanged: Audio volume changes for UI progress bar animation.
- *   - onPartialResult: Instant interim transcription updates for user preview.
- *   - onFinalResult: Complete final raw transcript + precise ASR latency in milliseconds.
- *   - onError: Human-readable error message.
- * - Thread Safety: SpeechRecognizer strictly instantiated and invoked on the Main Looper.
+ * Manages live-streaming Speech-to-Text recognition using Android's SpeechRecognizer.
+ * Supports on-device offline models with graceful auto-recovery when offline voice packs are missing.
  */
 class PixelStreamingSttManager(private val context: Context) {
 
     companion object {
         private const val TAG = "PixelStreamingStt"
+        private const val ERROR_LANGUAGE_UNAVAILABLE = 13
+        private const val ERROR_LANGUAGE_NOT_SUPPORTED = 12
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var speechRecognizer: SpeechRecognizer? = null
     private var isListening = false
     private var startTimeMs = 0L
+    private var hasRetriedWithStandard = false
 
     val isAvailable: Boolean
         get() {
@@ -48,7 +42,7 @@ class PixelStreamingSttManager(private val context: Context) {
         }
 
     /**
-     * Starts live audio streaming recognition.
+     * Starts live audio streaming recognition with auto-fallback.
      */
     fun startListening(
         onRmsChanged: (Float) -> Unit,
@@ -56,8 +50,25 @@ class PixelStreamingSttManager(private val context: Context) {
         onFinalResult: (transcript: String, asrDurationMs: Long) -> Unit,
         onError: (errorMessage: String) -> Unit
     ): Boolean {
+        hasRetriedWithStandard = false
+        return startListeningInternal(
+            preferOffline = true,
+            onRmsChanged = onRmsChanged,
+            onPartialResult = onPartialResult,
+            onFinalResult = onFinalResult,
+            onError = onError
+        )
+    }
+
+    private fun startListeningInternal(
+        preferOffline: Boolean,
+        onRmsChanged: (Float) -> Unit,
+        onPartialResult: (String) -> Unit,
+        onFinalResult: (transcript: String, asrDurationMs: Long) -> Unit,
+        onError: (errorMessage: String) -> Unit
+    ): Boolean {
         if (!isAvailable) {
-            onError("此裝置尚未就緒系統離線語音辨識（請確認 Google 語音服務已下載中文套件）")
+            onError("此裝置系統語音服務尚未就緒")
             return false
         }
 
@@ -66,13 +77,13 @@ class PixelStreamingSttManager(private val context: Context) {
         try {
             startTimeMs = System.currentTimeMillis()
 
-            val recognizer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            val recognizer = if (preferOffline && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
                 SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
             ) {
                 Log.d(TAG, "Creating dedicated On-Device SpeechRecognizer")
                 SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
             } else {
-                Log.d(TAG, "Creating standard system SpeechRecognizer with offline flag")
+                Log.d(TAG, "Creating standard system SpeechRecognizer (preferOffline=$preferOffline)")
                 SpeechRecognizer.createSpeechRecognizer(context)
             }
 
@@ -81,7 +92,10 @@ class PixelStreamingSttManager(private val context: Context) {
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-TW")
-                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+                putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf("zh-TW", "en-US", "cmn-Hant-TW"))
+                if (preferOffline) {
+                    putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+                }
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                 putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
             }
@@ -107,8 +121,25 @@ class PixelStreamingSttManager(private val context: Context) {
 
                 override fun onError(error: Int) {
                     isListening = false
+                    Log.w(TAG, "SpeechRecognizer onError: $error (hasRetried=$hasRetriedWithStandard, preferOffline=$preferOffline)")
+
+                    // If error is 13 (Language unavailable for offline) or 12, retry with standard recognizer
+                    if ((error == ERROR_LANGUAGE_UNAVAILABLE || error == ERROR_LANGUAGE_NOT_SUPPORTED) && !hasRetriedWithStandard) {
+                        Log.i(TAG, "Offline pack for zh-TW missing (error $error), auto-recovering with system speech service...")
+                        hasRetriedWithStandard = true
+                        mainHandler.post {
+                            startListeningInternal(
+                                preferOffline = false,
+                                onRmsChanged = onRmsChanged,
+                                onPartialResult = onPartialResult,
+                                onFinalResult = onFinalResult,
+                                onError = onError
+                            )
+                        }
+                        return
+                    }
+
                     val errorMsg = mapErrorCodeToMessage(error)
-                    Log.w(TAG, "SpeechRecognizer error: $error ($errorMsg)")
                     onError(errorMsg)
                     stopAndDestroyRecognizer()
                 }
@@ -194,6 +225,8 @@ class PixelStreamingSttManager(private val context: Context) {
             SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "辨識引擎忙碌中"
             SpeechRecognizer.ERROR_SERVER -> "語音辨識服務異常"
             SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "未偵測到聲音"
+            ERROR_LANGUAGE_UNAVAILABLE -> "手機尚未下載繁體中文離線語音包（可至手機「設定 ➔ 系統 ➔ 語言 ➔ 語音輸入」下載繁體中文）"
+            ERROR_LANGUAGE_NOT_SUPPORTED -> "此裝置系統未支援該語系離線辨識"
             else -> "語音辨識錯誤 ($error)"
         }
     }

@@ -41,7 +41,7 @@ class HybridPipelineCoordinator(
 
     companion object {
         private const val TAG = "HybridCoordinator"
-        private const val CLOUD_TIMEOUT_MS = 2000L
+        private const val CLOUD_TIMEOUT_MS = 7000L
     }
 
     private val executor = Executors.newCachedThreadPool()
