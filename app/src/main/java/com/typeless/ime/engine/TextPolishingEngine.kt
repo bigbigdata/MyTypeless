@@ -117,13 +117,32 @@ class LocalAdaptivePolishingEngine(
     }
 
     override fun polish(rawText: String, knownVocabulary: List<String>): Result<String> {
-        Log.i(TAG, "Polishing with engine: $name")
+        Log.i(TAG, "Polishing with engine: $name (knownVocab size: ${knownVocabulary.size})")
 
-        // Pre-cleaning with regex to reduce token count
+        // 1. Pre-cleaning with regex to remove filler words ("呃", "那個", etc.)
         val preCleaned = ruleEngine.polish(rawText, knownVocabulary).getOrDefault(rawText)
 
-        // If AICore or Gemma 2 are integrated in future milestones, dispatch here:
-        // When running in baseline/safety tier, return preCleaned result directly.
-        return Result.success(preCleaned)
+        // 2. Vocabulary-Guided Restoration:
+        // Scans for known technical terms/acronyms from user's custom SQLite dictionary.
+        // Restores case-insensitive matches and fixes common ASR code-switching misrecognitions.
+        var restored = preCleaned
+        for (term in knownVocabulary.take(40)) {
+            if (term.isBlank() || term.length < 2) continue
+            // Case-insensitive boundary match for English terms
+            if (term.first().isLetter()) {
+                val pattern = Regex("(?i)\\b${Regex.escape(term)}\\b")
+                restored = restored.replace(pattern, term)
+            }
+        }
+
+        // 3. Punctuation assurance: If the sentence is non-empty and lacks terminating punctuation, append "。"
+        val trimmed = restored.trim()
+        val finalWithPunctuation = if (trimmed.isNotEmpty() && !trimmed.endsWith("。") && !trimmed.endsWith("！") && !trimmed.endsWith("？") && !trimmed.endsWith("!")) {
+            "$trimmed。"
+        } else {
+            trimmed
+        }
+
+        return Result.success(finalWithPunctuation)
     }
 }

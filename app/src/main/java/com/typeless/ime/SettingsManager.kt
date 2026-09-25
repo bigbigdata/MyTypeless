@@ -18,8 +18,15 @@ class SettingsManager(context: Context) {
         private const val KEY_GEMINI_API_KEY = "gemini_api_key"
         private const val KEY_GEMINI_MODEL = "gemini_model"
         private const val KEY_GROQ_API_KEY = "groq_api_key"
+        private const val KEY_FORCED_OFFLINE_MODE = "forced_offline_mode"
         const val DEFAULT_MODEL = "gemini-2.5-flash"
     }
+
+    var isForcedOfflineMode: Boolean
+        get() = prefs.getBoolean(KEY_FORCED_OFFLINE_MODE, false)
+        set(value) {
+            prefs.edit().putBoolean(KEY_FORCED_OFFLINE_MODE, value).apply()
+        }
 
     var apiKey: String?
         get() = prefs.getString(KEY_GEMINI_API_KEY, null)?.trim()?.ifEmpty { null }

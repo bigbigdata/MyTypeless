@@ -28,7 +28,9 @@ import com.typeless.ime.ai.GeminiAudioClient
 import com.typeless.ime.ai.GroqWhisperClient
 import com.typeless.ime.audio.AudioRecorderManager
 import com.typeless.ime.engine.HybridPipelineCoordinator
+import com.typeless.ime.engine.LocalAdaptivePolishingEngine
 import com.typeless.ime.engine.NetworkStateMonitor
+import com.typeless.ime.engine.PixelStreamingSttManager
 import com.typeless.ime.vocabulary.VocabularyRepository
 import java.io.File
 import kotlin.concurrent.thread
@@ -58,6 +60,8 @@ class TypelessInputMethodService : InputMethodService() {
     private lateinit var vocabularyRepository: VocabularyRepository
     private lateinit var networkMonitor: NetworkStateMonitor
     private lateinit var hybridCoordinator: HybridPipelineCoordinator
+    private lateinit var pixelSttManager: PixelStreamingSttManager
+    private lateinit var localPolishingEngine: LocalAdaptivePolishingEngine
 
     private var isRecording = false
     private var isProcessing = false
@@ -75,6 +79,7 @@ class TypelessInputMethodService : InputMethodService() {
     private var btnSpace: MaterialButton? = null
     private var btnDelete: MaterialButton? = null
     private var btnAction: MaterialButton? = null
+    private var btnModeToggle: Button? = null
     private var lastEditorInfo: EditorInfo? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -101,6 +106,8 @@ class TypelessInputMethodService : InputMethodService() {
         groqClient = GroqWhisperClient { settingsManager.groqApiKey }
         geminiClient = GeminiAudioClient { settingsManager.apiKey }
         networkMonitor = NetworkStateMonitor(this)
+        pixelSttManager = PixelStreamingSttManager(this)
+        localPolishingEngine = LocalAdaptivePolishingEngine(this)
         hybridCoordinator = HybridPipelineCoordinator(
             context = this,
             networkMonitor = networkMonitor,
@@ -134,6 +141,16 @@ class TypelessInputMethodService : InputMethodService() {
         btnDelete?.setIconResource(R.drawable.ic_backspace)
         btnDelete?.iconTint = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.ime_text_primary))
         btnDelete?.iconGravity = MaterialButton.ICON_GRAVITY_TEXT_START
+
+        // Bind mode toggle button (Cloud vs Pixel On-Device)
+        btnModeToggle = view.findViewById(R.id.btn_mode_toggle)
+        updateModeToggleButtonUi()
+        btnModeToggle?.setOnClickListener {
+            settingsManager.isForcedOfflineMode = !settingsManager.isForcedOfflineMode
+            updateModeToggleButtonUi()
+            val modeStr = if (settingsManager.isForcedOfflineMode) "📱 Pixel 端側模式" else "☁️ 雲端優先模式"
+            Toast.makeText(this, "已切換為：$modeStr", Toast.LENGTH_SHORT).show()
+        }
 
         updateStatusPrompt()
 
@@ -381,21 +398,28 @@ class TypelessInputMethodService : InputMethodService() {
                 wasRecordingAtDown = isRecording
 
                 if (!isRecording) {
-                    if (!settingsManager.hasGroqApiKey && !settingsManager.hasApiKey && networkMonitor.isOnline) {
+                    val isDeviceMode = settingsManager.isForcedOfflineMode || !networkMonitor.isOnline
+                    if (!isDeviceMode && !settingsManager.hasGroqApiKey && !settingsManager.hasApiKey) {
                         Toast.makeText(this, "請先在設定中輸入 Groq 或 Gemini Key", Toast.LENGTH_SHORT).show()
                         openSettingsActivity()
                         return true
                     }
 
-                    // Pre-warm connection pool asynchronously to eliminate TLS handshake latency
-                    groqClient.prewarmConnection()
-                    geminiClient.prewarmConnection()
+                    if (!isDeviceMode) {
+                        // Pre-warm connection pool asynchronously to eliminate TLS handshake latency
+                        groqClient.prewarmConnection()
+                        geminiClient.prewarmConnection()
+                    }
 
                     triggerHapticFeedback(45)
 
                     PermissionActivity.requestRecordAudio(this) { granted ->
                         if (granted) {
-                            startRecordingFlow()
+                            if (isDeviceMode) {
+                                startOnDeviceRecordingFlow()
+                            } else {
+                                startRecordingFlow()
+                            }
                         } else {
                             tvStatus?.text = "未授權麥克風，無法進行語音輸入"
                             Toast.makeText(this, "請允許麥克風權限以使用語音輸入", Toast.LENGTH_SHORT).show()
@@ -500,6 +524,12 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     private fun stopRecordingFlow() {
+        val isDeviceMode = settingsManager.isForcedOfflineMode || !networkMonitor.isOnline
+        if (isDeviceMode) {
+            stopOnDeviceRecordingFlow()
+            return
+        }
+
         val audioFile: File? = audioRecorderManager.stopRecording()
         isRecording = false
         isSlidingToCancel = false
@@ -529,6 +559,108 @@ class TypelessInputMethodService : InputMethodService() {
         }
     }
 
+    private fun startOnDeviceRecordingFlow() {
+        val jobId = ++activeProcessingJobId
+        val started = pixelSttManager.startListening(
+            onRmsChanged = { rmsdB ->
+                pbAudioLevel?.post {
+                    val progress = ((rmsdB + 2f) * 10f).toInt().coerceIn(0, 100)
+                    pbAudioLevel?.progress = progress
+                }
+            },
+            onPartialResult = { partial ->
+                tvStatus?.post {
+                    tvStatus?.text = "🗣️ 正在辨識: $partial"
+                }
+            },
+            onFinalResult = { rawText, asrDurationMs ->
+                mainHandler.post {
+                    processOnDeviceStage2(rawText, asrDurationMs, jobId)
+                }
+            },
+            onError = { errorMsg ->
+                mainHandler.post {
+                    abortProcessingFlow("❌ $errorMsg")
+                }
+            }
+        )
+
+        if (started) {
+            isRecording = true
+            isSlidingToCancel = false
+            tvStatus?.text = "📱 Pixel 離線語音聆聽中..."
+            pbAudioLevel?.visibility = View.VISIBLE
+            btnRecord?.text = getString(R.string.btn_record_stop)
+            btnRecord?.backgroundTintList = ColorStateList.valueOf(
+                ContextCompat.getColor(this, R.color.ime_recording)
+            )
+            updateDeleteButtonToCancelMode()
+        } else {
+            tvStatus?.text = "原生離線語音啟動失敗"
+            resetRecordButtonUi()
+        }
+    }
+
+    private fun stopOnDeviceRecordingFlow() {
+        isRecording = false
+        isSlidingToCancel = false
+        triggerHapticFeedback(65)
+        pbAudioLevel?.visibility = View.INVISIBLE
+        pbAudioLevel?.progress = 0
+
+        isProcessing = true
+        btnRecord?.isEnabled = false
+        btnRecord?.text = "⏳ Pixel 處理中..."
+        btnRecord?.backgroundTintList = ColorStateList.valueOf(
+            ContextCompat.getColor(this, R.color.ime_card)
+        )
+        updateDeleteButtonToCancelMode()
+
+        pixelSttManager.stopListening()
+    }
+
+    private fun processOnDeviceStage2(rawText: String, asrDurationMs: Long, jobId: Long) {
+        if (jobId != activeProcessingJobId) return
+
+        isProcessing = true
+        tvStatus?.text = "📱 Pixel 端側潤飾中..."
+
+        thread(start = true, name = "OnDevicePolishingThread") {
+            val polishStartTime = System.currentTimeMillis()
+            val terms = vocabularyRepository.getAllTermsForGemini(limit = 40)
+            val polishResult = localPolishingEngine.polish(rawText, terms)
+            val polishDurationMs = System.currentTimeMillis() - polishStartTime
+            val totalMs = asrDurationMs + polishDurationMs
+
+            val finalText = polishResult.getOrDefault(rawText)
+
+            if (jobId != activeProcessingJobId) return@thread
+
+            // Asynchronously record usage and auto-harvest terms in existing SQLite dictionary
+            vocabularyRepository.recordUsageAsync(finalText)
+
+            mainHandler.post {
+                injectText(finalText)
+                val badge = "📱 端側完成｜ASR: ${asrDurationMs}ms ➔ 潤飾: ${polishDurationMs}ms (總計 ${totalMs}ms)"
+                tvStatus?.text = badge
+                Toast.makeText(this@TypelessInputMethodService, badge, Toast.LENGTH_SHORT).show()
+                triggerHapticFeedback(40)
+                resetRecordButtonUi()
+                isProcessing = false
+            }
+        }
+    }
+
+    private fun updateModeToggleButtonUi() {
+        if (settingsManager.isForcedOfflineMode) {
+            btnModeToggle?.text = "📱 端側"
+            btnModeToggle?.setTextColor(ContextCompat.getColor(this, R.color.ime_recording))
+        } else {
+            btnModeToggle?.text = "☁️ 雲端"
+            btnModeToggle?.setTextColor(ContextCompat.getColor(this, R.color.ime_text_secondary))
+        }
+    }
+
     /**
      * Aborts and discards the active audio recording without transcription.
      */
@@ -536,6 +668,7 @@ class TypelessInputMethodService : InputMethodService() {
         isRecording = false
         isSlidingToCancel = false
         audioRecorderManager.cancelRecording()
+        pixelSttManager.cancel()
         triggerHapticFeedback(80)
 
         mainHandler.post {
@@ -713,6 +846,7 @@ class TypelessInputMethodService : InputMethodService() {
     override fun onDestroy() {
         super.onDestroy()
         networkMonitor.unregister()
+        pixelSttManager.cancel()
         deleteHandler.removeCallbacks(deleteRunnable)
         spaceHandler.removeCallbacks(spaceRunnable)
         if (isRecording) {
