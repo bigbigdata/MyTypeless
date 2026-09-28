@@ -6,6 +6,7 @@ import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import android.util.Log
+import com.typeless.ime.BuildConfig
 
 /**
  * VocabularyDatabaseHelper
@@ -110,7 +111,9 @@ class VocabularyDatabaseHelper(context: Context) :
                 db.insertWithOnConflict(TABLE_NAME, null, cv, SQLiteDatabase.CONFLICT_IGNORE)
             }
             db.setTransactionSuccessful()
-            Log.d(TAG, "Pre-seeded ${DEFAULT_SEEDS.size} default vocabulary terms")
+            if (BuildConfig.DEBUG) {
+                Log.d(TAG, "Pre-seeded ${DEFAULT_SEEDS.size} default vocabulary terms")
+            }
         } finally {
             db.endTransaction()
         }
@@ -282,7 +285,9 @@ class VocabularyDatabaseHelper(context: Context) :
             db.delete(TABLE_NAME, null, null)
             seedDefaults(db)
             db.setTransactionSuccessful()
-            Log.i(TAG, "Reset vocabulary database to defaults successfully")
+            if (BuildConfig.DEBUG) {
+                Log.i(TAG, "Reset vocabulary database to defaults successfully")
+            }
         } finally {
             db.endTransaction()
         }

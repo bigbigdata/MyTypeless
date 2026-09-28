@@ -586,7 +586,9 @@ class TypelessInputMethodService : InputMethodService() {
                     rawText = text
                 }
             }.onFailure { err ->
-                Log.w(TAG, "Groq transcription failed: ${err.message}")
+                if (BuildConfig.DEBUG) {
+                    Log.w(TAG, "Groq transcription failed: ${err.message}")
+                }
             }
         }
 
@@ -599,7 +601,9 @@ class TypelessInputMethodService : InputMethodService() {
                 onProcessingSuccess("🤖 Gemini 直傳完成", polished, jobId)
                 return
             }.onFailure { err ->
-                Log.w(TAG, "Gemini direct audio transcription failed: ${err.message}")
+                if (BuildConfig.DEBUG) {
+                    Log.w(TAG, "Gemini direct audio transcription failed: ${err.message}")
+                }
             }
         }
 
@@ -612,7 +616,7 @@ class TypelessInputMethodService : InputMethodService() {
             return
         }
 
-        Log.i(TAG, "===> [Stage 1 STT Raw]: \"$rawText\"")
+        Log.i(TAG, "===> [Stage 1 STT Raw]: (${rawText?.length ?: 0} chars)")
 
         // Latency optimization: Fast-Path Skip for ultra-short affirmations.
         // For common 1-4 character affirmations (e.g., "OK", "Sure", "Thanks", "No problem"),
@@ -620,7 +624,7 @@ class TypelessInputMethodService : InputMethodService() {
         if (isFastPathCandidate(rawText!!)) {
             val localCleaned = cleanFillerWordsLocally(rawText!!)
             val formatted = applyPanguSpacing(localCleaned)
-            Log.i(TAG, "===> [Fast-Path Direct]: \"$formatted\"")
+            Log.i(TAG, "===> [Fast-Path Direct]: (${formatted.length} chars)")
             onProcessingSuccess("⚡ 極速直出 (Fast-Path)", formatted, jobId)
             return
         }
@@ -632,18 +636,20 @@ class TypelessInputMethodService : InputMethodService() {
             if (jobId != activeProcessingJobId) return
             polishResult.onSuccess { polished ->
                 val textToInject = if (polished.isNotBlank()) polished else rawText!!
-                Log.i(TAG, "===> [Stage 2 Gemini Polished]: \"$textToInject\"")
+                Log.i(TAG, "===> [Stage 2 Gemini Polished]: (${textToInject.length} chars)")
                 onProcessingSuccess("⚡ Groq + 🤖 Gemini 潤飾完成", textToInject, jobId)
             }.onFailure { err ->
-                Log.w(TAG, "Gemini polishing failed or rate limited (429), falling back to local output: ${err.message}")
+                if (BuildConfig.DEBUG) {
+                    Log.w(TAG, "Gemini polishing failed or rate limited (429), falling back to local output: ${err.message}")
+                }
                 val localCleaned = cleanFillerWordsLocally(rawText!!)
-                Log.i(TAG, "===> [Stage 2 Local Fallback]: \"$localCleaned\"")
+                Log.i(TAG, "===> [Stage 2 Local Fallback]: (${localCleaned.length} chars)")
                 onProcessingSuccess("⚡ Groq 直出（AI 冷卻中）", localCleaned, jobId)
             }
         } else {
             // If no Gemini API key is configured, perform local filtering and output directly
             val localCleaned = cleanFillerWordsLocally(rawText!!)
-            Log.i(TAG, "===> [Stage 2 Direct]: \"$localCleaned\"")
+            Log.i(TAG, "===> [Stage 2 Direct]: (${localCleaned.length} chars)")
             onProcessingSuccess("⚡ Groq 直出", localCleaned, jobId)
         }
     }

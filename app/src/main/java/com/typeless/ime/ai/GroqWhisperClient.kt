@@ -1,6 +1,7 @@
 package com.typeless.ime.ai
 
 import android.util.Log
+import com.typeless.ime.BuildConfig
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
@@ -47,7 +48,9 @@ class GroqWhisperClient(private val apiKeyProvider: () -> String?) {
                     .head()
                     .build()
                 client.newCall(req).execute().close()
-                Log.d(TAG, "Groq connection pool pre-warmed successfully")
+                if (BuildConfig.DEBUG) {
+                    Log.d(TAG, "Groq connection pool pre-warmed successfully")
+                }
             } catch (_: Exception) {
                 // Pre-warming failure is non-fatal; regular calls will establish connection as normal
             }
@@ -111,7 +114,7 @@ class GroqWhisperClient(private val apiKeyProvider: () -> String?) {
 
                 val json = JSONObject(body)
                 val text = json.optString("text", "").trim()
-                Log.i(TAG, "Groq STT transcribed successfully: $text")
+                Log.i(TAG, "Groq STT transcribed successfully (${text.length} chars)")
                 Result.success(text)
             }
         } catch (e: Exception) {
