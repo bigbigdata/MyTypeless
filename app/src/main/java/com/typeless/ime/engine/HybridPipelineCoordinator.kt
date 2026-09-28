@@ -2,6 +2,7 @@ package com.typeless.ime.engine
 
 import android.content.Context
 import android.util.Log
+import com.typeless.ime.BuildConfig
 import com.typeless.ime.SettingsManager
 import com.typeless.ime.ai.GeminiAudioClient
 import com.typeless.ime.ai.GroqWhisperClient
@@ -73,7 +74,7 @@ class HybridPipelineCoordinator(
         onStatusUpdate: (String) -> Unit
     ): Result<PipelineOutput> {
         if (!activeJobCheck()) return Result.failure(Exception("Job cancelled"))
-        Log.d(TAG, "Starting process for jobId=$jobId")
+        if (BuildConfig.DEBUG) Log.d(TAG, "Starting process for jobId=$jobId")
 
         val isOnline = networkMonitor.isOnline
         val hasCloudKeys = settingsManager.hasGroqApiKey || settingsManager.hasApiKey
@@ -98,12 +99,12 @@ class HybridPipelineCoordinator(
                 result.onSuccess { text ->
                     if (text.isNotBlank()) rawTranscript = text
                 }.onFailure { err ->
-                    Log.w(TAG, "Cloud Groq STT failed: ${err.message}, attempting fallback")
+                    if (BuildConfig.DEBUG) Log.w(TAG, "Cloud Groq STT failed: ${err.message}, attempting fallback")
                 }
             } catch (e: TimeoutException) {
-                Log.w(TAG, "Cloud Groq STT timed out (> ${CLOUD_TIMEOUT_MS}ms), activating circuit breaker")
+                if (BuildConfig.DEBUG) Log.w(TAG, "Cloud Groq STT timed out (> ${CLOUD_TIMEOUT_MS}ms), activating circuit breaker")
             } catch (e: Exception) {
-                Log.w(TAG, "Cloud Groq STT exception: ${e.message}")
+                if (BuildConfig.DEBUG) Log.w(TAG, "Cloud Groq STT exception: ${e.message}")
             }
         }
 
@@ -115,7 +116,7 @@ class HybridPipelineCoordinator(
             localResult.onSuccess { text ->
                 if (text.isNotBlank()) rawTranscript = text
             }.onFailure { err ->
-                Log.w(TAG, "Local STT failed or unavailable: ${err.message}")
+                if (BuildConfig.DEBUG) Log.w(TAG, "Local STT failed or unavailable: ${err.message}")
             }
         }
 
@@ -126,14 +127,14 @@ class HybridPipelineCoordinator(
         }
 
         val rawText = rawTranscript!!
-        Log.i(TAG, "===> [Stage 1 Output]: \"$rawText\" (Offline: $usedOfflineStt)")
+        Log.i(TAG, "===> [Stage 1 Output]: ${rawText.length} chars (Offline: $usedOfflineStt)")
 
         // ==========================================
         // LATENCY OPTIMIZATION: FAST-PATH BYPASS
         // ==========================================
         if (isFastPathCandidate(rawText)) {
             val fastOutput = ruleEngine.polish(rawText, knownVocabulary).getOrDefault(rawText)
-            Log.i(TAG, "===> [Fast-Path Direct]: \"$fastOutput\"")
+            Log.i(TAG, "===> [Fast-Path Direct]: ${fastOutput.length} chars")
             return Result.success(
                 PipelineOutput(
                     text = fastOutput,
@@ -167,7 +168,7 @@ class HybridPipelineCoordinator(
                     )
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "Cloud Gemini polish failed or timed out: ${e.message}, falling back to local adaptive engine")
+                if (BuildConfig.DEBUG) Log.w(TAG, "Cloud Gemini polish failed or timed out: ${e.message}, falling back to local adaptive engine")
             }
         }
 

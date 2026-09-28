@@ -10,6 +10,9 @@
 .cxx
 *.apk
 *.aab
+*.jks
+*.keystore
+google-services.json
 RULES.md
 rules.md
 improvement*.md

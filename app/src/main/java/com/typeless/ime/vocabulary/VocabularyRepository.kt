@@ -2,6 +2,7 @@ package com.typeless.ime.vocabulary
 
 import android.content.Context
 import android.util.Log
+import com.typeless.ime.BuildConfig
 import kotlin.concurrent.thread
 
 /**
@@ -75,7 +76,9 @@ class VocabularyRepository private constructor(context: Context) {
         }
         sb.append("。")
         val finalPrompt = sb.toString()
-        Log.d(TAG, "Assembled dynamic Whisper prompt ($addedCount terms, ${finalPrompt.length} chars): $finalPrompt")
+        if (BuildConfig.DEBUG) {
+            Log.d(TAG, "Assembled dynamic Whisper prompt ($addedCount terms, ${finalPrompt.length} chars)")
+        }
         return finalPrompt
     }
 
@@ -133,10 +136,12 @@ class VocabularyRepository private constructor(context: Context) {
                     }
                 }
 
-                Log.d(
-                    TAG,
-                    "Usage tracking finished: matched $matchCount existing, auto-harvested/updated $newHarvestCount terms"
-                )
+                if (BuildConfig.DEBUG) {
+                    Log.d(
+                        TAG,
+                        "Usage tracking finished: matched $matchCount existing, auto-harvested/updated $newHarvestCount terms"
+                    )
+                }
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to record vocabulary usage", e)
             }

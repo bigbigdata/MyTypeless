@@ -2,6 +2,7 @@ package com.typeless.ime.ai
 
 import android.util.Base64
 import android.util.Log
+import com.typeless.ime.BuildConfig
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -108,10 +109,16 @@ class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
         val apiKey = apiKeyProvider() ?: return
         thread(start = true, name = "GeminiPrewarmThread") {
             try {
-                val url = "https://generativelanguage.googleapis.com/v1beta/models?key=$apiKey"
-                val req = Request.Builder().url(url).head().build()
+                val url = "https://generativelanguage.googleapis.com/v1beta/models"
+                val req = Request.Builder()
+                    .url(url)
+                    .header("x-goog-api-key", apiKey)
+                    .head()
+                    .build()
                 client.newCall(req).execute().close()
-                Log.d(TAG, "Gemini connection pool pre-warmed successfully")
+                if (BuildConfig.DEBUG) {
+                    Log.d(TAG, "Gemini connection pool pre-warmed successfully")
+                }
             } catch (_: Exception) {
                 // Pre-warming failure is non-fatal
             }
@@ -192,19 +199,22 @@ class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
         try {
             return executeApiCall(model, apiKey, jsonPayload)
         } catch (e: ServerUnavailableException) {
-            Log.w(TAG, "Gemini server busy (503), waiting 1s before retrying once...")
+            if (BuildConfig.DEBUG) {
+                Log.w(TAG, "Gemini server busy (503), waiting 1s before retrying once...")
+            }
             Thread.sleep(1000)
             return executeApiCall(model, apiKey, jsonPayload)
         }
     }
 
     private fun executeApiCall(model: String, apiKey: String, jsonPayload: String): String {
-        val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent"
         val mediaType = "application/json; charset=utf-8".toMediaType()
         val requestBody = jsonPayload.toRequestBody(mediaType)
 
         val request = Request.Builder()
             .url(url)
+            .header("x-goog-api-key", apiKey)
             .post(requestBody)
             .build()
 

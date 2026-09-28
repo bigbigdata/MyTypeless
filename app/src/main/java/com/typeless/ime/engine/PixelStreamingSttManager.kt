@@ -10,6 +10,7 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Log
+import com.typeless.ime.BuildConfig
 
 /**
  * PixelStreamingSttManager
@@ -92,10 +93,10 @@ class PixelStreamingSttManager(private val context: Context) {
             val recognizer = if (preferOffline && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
                 SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
             ) {
-                Log.d(TAG, "Creating dedicated On-Device SpeechRecognizer")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Creating dedicated On-Device SpeechRecognizer")
                 SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
             } else {
-                Log.d(TAG, "Creating standard system SpeechRecognizer (preferOffline=$preferOffline)")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Creating standard system SpeechRecognizer (preferOffline=$preferOffline)")
                 SpeechRecognizer.createSpeechRecognizer(context)
             }
 
@@ -122,11 +123,11 @@ class PixelStreamingSttManager(private val context: Context) {
 
             recognizer.setRecognitionListener(object : RecognitionListener {
                 override fun onReadyForSpeech(params: Bundle?) {
-                    Log.d(TAG, "SpeechRecognizer ready for speech")
+                    if (BuildConfig.DEBUG) Log.d(TAG, "SpeechRecognizer ready for speech")
                 }
 
                 override fun onBeginningOfSpeech() {
-                    Log.d(TAG, "Speech beginning detected")
+                    if (BuildConfig.DEBUG) Log.d(TAG, "Speech beginning detected")
                 }
 
                 override fun onRmsChanged(rmsdB: Float) {
@@ -136,11 +137,11 @@ class PixelStreamingSttManager(private val context: Context) {
                 override fun onBufferReceived(buffer: ByteArray?) {}
 
                 override fun onEndOfSpeech() {
-                    Log.d(TAG, "Speech segment end detected by VAD")
+                    if (BuildConfig.DEBUG) Log.d(TAG, "Speech segment end detected by VAD")
                 }
 
                 override fun onError(error: Int) {
-                    Log.w(TAG, "SpeechRecognizer onError: $error (isUserRecording=$isUserRecording, preferOffline=$preferOffline)")
+                    if (BuildConfig.DEBUG) Log.w(TAG, "SpeechRecognizer onError: $error (isUserRecording=$isUserRecording, preferOffline=$preferOffline)")
 
                     // Auto-recovery for Error 13 (Language unavailable) or Error 12
                     if ((error == ERROR_LANGUAGE_UNAVAILABLE || error == ERROR_LANGUAGE_NOT_SUPPORTED) && !hasRetriedWithStandard) {
@@ -165,7 +166,7 @@ class PixelStreamingSttManager(private val context: Context) {
                             return
                         }
 
-                        Log.d(TAG, "Transient pause/reset (error $error) while user is still recording. Re-arming listener...")
+                        if (BuildConfig.DEBUG) Log.d(TAG, "Transient pause/reset (error $error) while user is still recording. Re-arming listener...")
                         stopAndDestroyRecognizer()
                         val delayMs = when (error) {
                             SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> 350L
@@ -182,7 +183,7 @@ class PixelStreamingSttManager(private val context: Context) {
 
                     // ONLY when user is NO LONGER recording (!isUserRecording):
                     if (accumulatedTranscript.isNotEmpty()) {
-                        Log.i(TAG, "User finished recording. Delivering accumulated transcript: $accumulatedTranscript")
+                        Log.i(TAG, "User finished recording. Delivering accumulated transcript (${accumulatedTranscript.length} chars)")
                         deliverFinalResult()
                         return
                     }
@@ -196,7 +197,7 @@ class PixelStreamingSttManager(private val context: Context) {
                     val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     val rawText = matches?.firstOrNull()?.trim().orEmpty()
                     val text = TraditionalChineseConverter.toTraditional(rawText)
-                    Log.i(TAG, "SpeechRecognizer segment onResults: \"$text\" (raw: \"$rawText\", isUserRecording=$isUserRecording)")
+                    if (BuildConfig.DEBUG) Log.d(TAG, "SpeechRecognizer segment onResults: ${text.length} chars (isUserRecording=$isUserRecording)")
 
                     if (text.isNotBlank()) {
                         if (accumulatedTranscript.isNotEmpty() && !accumulatedTranscript.endsWith(" ")) {
@@ -253,19 +254,19 @@ class PixelStreamingSttManager(private val context: Context) {
      * User explicitly taps the Stop button to finish recording.
      */
     fun stopListeningByUser() {
-        Log.i(TAG, "User explicitly tapped stop. Finalizing accumulated transcript...")
+        if (BuildConfig.DEBUG) Log.d(TAG, "User explicitly tapped stop. Finalizing accumulated transcript...")
         isUserRecording = false
         if (speechRecognizer != null) {
             try {
                 speechRecognizer?.stopListening()
                 mainHandler.postDelayed({
                     if (speechRecognizer != null) {
-                        Log.i(TAG, "Stop timeout reached, finalizing immediately.")
+                        if (BuildConfig.DEBUG) Log.d(TAG, "Stop timeout reached, finalizing immediately.")
                         deliverFinalResult()
                     }
                 }, 1000L)
             } catch (e: Exception) {
-                Log.w(TAG, "Error stopping SpeechRecognizer: ${e.message}")
+                if (BuildConfig.DEBUG) Log.w(TAG, "Error stopping SpeechRecognizer: ${e.message}")
                 deliverFinalResult()
             }
         } else {
@@ -277,7 +278,7 @@ class PixelStreamingSttManager(private val context: Context) {
         isUserRecording = false
         val finalTranscript = accumulatedTranscript.toString().trim()
         val elapsed = System.currentTimeMillis() - startTimeMs
-        Log.i(TAG, "Delivering final accumulated transcript: \"$finalTranscript\" in ${elapsed}ms")
+        Log.i(TAG, "Delivering final accumulated transcript (${finalTranscript.length} chars in ${elapsed}ms)")
 
         if (finalTranscript.isNotBlank()) {
             cbFinalResult?.invoke(finalTranscript, elapsed)
