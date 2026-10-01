@@ -42,7 +42,8 @@ class HybridPipelineCoordinator(
 
     companion object {
         private const val TAG = "HybridCoordinator"
-        private const val CLOUD_TIMEOUT_MS = 7000L
+        private const val CLOUD_STT_TIMEOUT_MS = 45_000L  // 45s for audio upload & Groq Whisper transcription of long audio
+        private const val CLOUD_POLISH_TIMEOUT_MS = 15_000L // 15s for Gemini text polishing
     }
 
     private val executor = Executors.newCachedThreadPool()
@@ -95,14 +96,14 @@ class HybridPipelineCoordinator(
                 val future = executor.submit(Callable {
                     cloudSttEngine.transcribe(audioFile, dynamicWhisperPrompt)
                 })
-                val result = future.get(CLOUD_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                val result = future.get(CLOUD_STT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
                 result.onSuccess { text ->
                     if (text.isNotBlank()) rawTranscript = text
                 }.onFailure { err ->
                     if (BuildConfig.DEBUG) Log.w(TAG, "Cloud Groq STT failed: ${err.message}, attempting fallback")
                 }
             } catch (e: TimeoutException) {
-                if (BuildConfig.DEBUG) Log.w(TAG, "Cloud Groq STT timed out (> ${CLOUD_TIMEOUT_MS}ms), activating circuit breaker")
+                if (BuildConfig.DEBUG) Log.w(TAG, "Cloud Groq STT timed out (> ${CLOUD_STT_TIMEOUT_MS}ms), activating circuit breaker")
             } catch (e: Exception) {
                 if (BuildConfig.DEBUG) Log.w(TAG, "Cloud Groq STT exception: ${e.message}")
             }
@@ -153,7 +154,7 @@ class HybridPipelineCoordinator(
                 val future = executor.submit(Callable {
                     cloudPolishingEngine.polish(rawText, knownVocabulary)
                 })
-                val polishResult = future.get(CLOUD_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                val polishResult = future.get(CLOUD_POLISH_TIMEOUT_MS, TimeUnit.MILLISECONDS)
                 if (!activeJobCheck()) return Result.failure(Exception("Job cancelled"))
 
                 if (polishResult.isSuccess) {

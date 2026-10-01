@@ -1,13 +1,21 @@
 package com.typeless.ime
 
 import android.annotation.SuppressLint
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.res.ColorStateList
 import android.inputmethodservice.InputMethodService
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -22,6 +30,7 @@ import android.widget.Button
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.google.android.material.button.MaterialButton
 import com.typeless.ime.ai.GeminiAudioClient
@@ -51,6 +60,11 @@ class TypelessInputMethodService : InputMethodService() {
 
     companion object {
         private const val TAG = "TypelessIME"
+        const val ON_DEVICE_MAX_RECORDING_MS = 10 * 60 * 1000L // 10-minute safety limit for on-device recognition
+        private const val NOTIFICATION_CHANNEL_ID = "typeless_recording_channel"
+        private const val NOTIFICATION_ID = 1001
+        private const val ACTION_STOP_AND_SUBMIT = "com.typeless.ime.ACTION_STOP_AND_SUBMIT"
+        private const val ACTION_ABORT_RECORDING = "com.typeless.ime.ACTION_ABORT_RECORDING"
     }
 
     private lateinit var audioRecorderManager: AudioRecorderManager
@@ -72,6 +86,10 @@ class TypelessInputMethodService : InputMethodService() {
     private var wasRecordingAtDown = false
     @Volatile
     private var activeProcessingJobId = 0L
+
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var keyboardRootView: View? = null
+    private var lastTranscribedText: String? = null
 
     private var tvStatus: TextView? = null
     private var pbAudioLevel: ProgressBar? = null
@@ -98,10 +116,31 @@ class TypelessInputMethodService : InputMethodService() {
         }
     }
 
-    private val safetyTimeoutRunnable = Runnable {
+    private val onDeviceSafetyTimeoutRunnable = Runnable {
         if (isRecording) {
-            Toast.makeText(this@TypelessInputMethodService, "已達最大 60 秒錄音保護上限，自動送出", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this@TypelessInputMethodService, "已達端側語音辨識上限 (10分鐘)，自動送出", Toast.LENGTH_SHORT).show()
             stopRecordingFlow()
+        }
+    }
+
+    private val recordingControlReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                ACTION_STOP_AND_SUBMIT -> {
+                    Log.d(TAG, "Notification action: STOP_AND_SUBMIT")
+                    if (isRecording) {
+                        stopRecordingFlow()
+                    }
+                }
+                ACTION_ABORT_RECORDING -> {
+                    Log.d(TAG, "Notification action: ABORT_RECORDING")
+                    if (isRecording) {
+                        abortRecordingFlow(getString(R.string.status_recording_aborted))
+                    } else if (isProcessing) {
+                        abortProcessingFlow()
+                    }
+                }
+            }
         }
     }
 
@@ -128,6 +167,16 @@ class TypelessInputMethodService : InputMethodService() {
             groqClient = groqClient,
             geminiClient = geminiClient
         )
+
+        val filter = IntentFilter().apply {
+            addAction(ACTION_STOP_AND_SUBMIT)
+            addAction(ACTION_ABORT_RECORDING)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(recordingControlReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(recordingControlReceiver, filter)
+        }
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -137,6 +186,7 @@ class TypelessInputMethodService : InputMethodService() {
             com.google.android.material.R.style.Theme_MaterialComponents_DayNight_NoActionBar
         )
         val view = android.view.LayoutInflater.from(themedContext).inflate(R.layout.keyboard_view, null)
+        keyboardRootView = view
 
         tvStatus = view.findViewById(R.id.tv_status)
         pbAudioLevel = view.findViewById(R.id.pb_audio_level)
@@ -237,29 +287,131 @@ class TypelessInputMethodService : InputMethodService() {
     override fun onStartInputView(info: android.view.inputmethod.EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
         lastEditorInfo = info
-        updateStatusPrompt()
         updateActionButtonState(info)
+
+        if (isRecording) {
+            syncRecordingUiState()
+        } else if (isProcessing) {
+            syncProcessingUiState()
+        } else {
+            updateStatusPrompt()
+            resetRecordButtonUi()
+        }
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
         super.onFinishInputView(finishingInput)
-        cancelCurrentRecording()
+        deleteHandler.removeCallbacks(deleteRunnable)
+        spaceHandler.removeCallbacks(spaceRunnable)
     }
 
     override fun onWindowHidden() {
         super.onWindowHidden()
-        cancelCurrentRecording()
-    }
-
-    private fun cancelCurrentRecording() {
         deleteHandler.removeCallbacks(deleteRunnable)
         spaceHandler.removeCallbacks(spaceRunnable)
-        if (isRecording) {
-            abortRecordingFlow()
+    }
+
+    private fun acquireWakeLock() {
+        if (wakeLock == null) {
+            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            wakeLock = pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MyTypeless:RecordingWakeLock")?.apply {
+                setReferenceCounted(false)
+            }
         }
-        if (isProcessing) {
-            abortProcessingFlow()
+        wakeLock?.acquire(15 * 60 * 1000L) // Safety max 15 mins
+    }
+
+    private fun releaseWakeLock() {
+        try {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error releasing wakeLock", e)
         }
+    }
+
+    private fun setKeepScreenOn(keepOn: Boolean) {
+        keyboardRootView?.keepScreenOn = keepOn
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                NOTIFICATION_CHANNEL_ID,
+                "語音錄製中",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "MyTypeless 語音輸入背景錄製與控制"
+                setShowBadge(false)
+            }
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            nm?.createNotificationChannel(channel)
+        }
+    }
+
+    private fun showRecordingNotification() {
+        createNotificationChannel()
+
+        val stopIntent = Intent(ACTION_STOP_AND_SUBMIT).apply { setPackage(packageName) }
+        val stopPendingIntent = PendingIntent.getBroadcast(
+            this,
+            1,
+            stopIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val abortIntent = Intent(ACTION_ABORT_RECORDING).apply { setPackage(packageName) }
+        val abortPendingIntent = PendingIntent.getBroadcast(
+            this,
+            2,
+            abortIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_mic)
+            .setContentTitle("MyTypeless 錄音中🎙️")
+            .setContentText("正在持續收音... 點擊下方按鈕可隨時完成或放棄")
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .addAction(0, "⏹️ 停止並送出", stopPendingIntent)
+            .addAction(0, "✕ 放棄", abortPendingIntent)
+            .build()
+
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+        nm?.notify(NOTIFICATION_ID, notification)
+    }
+
+    private fun dismissRecordingNotification() {
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+        nm?.cancel(NOTIFICATION_ID)
+    }
+
+    private fun syncRecordingUiState() {
+        val isDeviceMode = settingsManager.isForcedOfflineMode || !networkMonitor.isOnline
+        tvStatus?.text = if (isDeviceMode) "🎙️ 聆聽中... 說完整句後請點擊送出" else getString(R.string.status_recording)
+        pbAudioLevel?.visibility = View.VISIBLE
+        btnRecord?.isEnabled = true
+        btnRecord?.text = getString(R.string.btn_record_stop)
+        btnRecord?.backgroundTintList = ColorStateList.valueOf(
+            ContextCompat.getColor(this, R.color.ime_recording)
+        )
+        updateDeleteButtonToCancelMode()
+        setKeepScreenOn(true)
+    }
+
+    private fun syncProcessingUiState() {
+        val isDeviceMode = settingsManager.isForcedOfflineMode || !networkMonitor.isOnline
+        tvStatus?.text = if (isDeviceMode) "⏳ Pixel 處理中..." else "⏳ 處理中..."
+        pbAudioLevel?.visibility = View.INVISIBLE
+        btnRecord?.isEnabled = false
+        btnRecord?.text = "⏳ 處理中..."
+        btnRecord?.backgroundTintList = ColorStateList.valueOf(
+            ContextCompat.getColor(this, R.color.ime_card)
+        )
+        updateDeleteButtonToCancelMode()
+        setKeepScreenOn(false)
     }
 
     private fun updateStatusPrompt() {
@@ -397,7 +549,7 @@ class TypelessInputMethodService : InputMethodService() {
 
     /**
      * Handles Pure Tap-to-Toggle recording:
-     * - Tap to start recording (runs until user explicitly taps again or 60s timeout).
+     * - Tap to start recording (runs until user explicitly taps again or safety timeout).
      * - Tap again to stop and submit.
      */
     private fun handleRecordToggleClick() {
@@ -438,8 +590,7 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     private fun startRecordingFlow() {
-        mainHandler.removeCallbacks(safetyTimeoutRunnable)
-        mainHandler.postDelayed(safetyTimeoutRunnable, 60_000L)
+        mainHandler.removeCallbacks(onDeviceSafetyTimeoutRunnable)
 
         val success = audioRecorderManager.startRecording(
             onAmplitude = { amplitude ->
@@ -451,7 +602,7 @@ class TypelessInputMethodService : InputMethodService() {
             onTimeout = {
                 mainHandler.post {
                     if (isRecording) {
-                        Toast.makeText(this@TypelessInputMethodService, "已達最大錄音保護上限，自動送出", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this@TypelessInputMethodService, "已達最大錄音保護上限 (15分鐘)，自動送出", Toast.LENGTH_SHORT).show()
                         stopRecordingFlow()
                     }
                 }
@@ -459,6 +610,10 @@ class TypelessInputMethodService : InputMethodService() {
         )
 
         if (success) {
+            acquireWakeLock()
+            setKeepScreenOn(true)
+            showRecordingNotification()
+
             isRecording = true
             isSlidingToCancel = false
             tvStatus?.text = getString(R.string.status_recording)
@@ -474,7 +629,11 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     private fun stopRecordingFlow() {
-        mainHandler.removeCallbacks(safetyTimeoutRunnable)
+        mainHandler.removeCallbacks(onDeviceSafetyTimeoutRunnable)
+        releaseWakeLock()
+        setKeepScreenOn(false)
+        dismissRecordingNotification()
+
         val isDeviceMode = settingsManager.isForcedOfflineMode || !networkMonitor.isOnline
         if (isDeviceMode) {
             stopOnDeviceRecordingFlow()
@@ -510,8 +669,8 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     private fun startOnDeviceRecordingFlow() {
-        mainHandler.removeCallbacks(safetyTimeoutRunnable)
-        mainHandler.postDelayed(safetyTimeoutRunnable, 60_000L)
+        mainHandler.removeCallbacks(onDeviceSafetyTimeoutRunnable)
+        mainHandler.postDelayed(onDeviceSafetyTimeoutRunnable, ON_DEVICE_MAX_RECORDING_MS)
 
         val jobId = ++activeProcessingJobId
         val started = pixelSttManager.startListening(
@@ -539,6 +698,10 @@ class TypelessInputMethodService : InputMethodService() {
         )
 
         if (started) {
+            acquireWakeLock()
+            setKeepScreenOn(true)
+            showRecordingNotification()
+
             isRecording = true
             isSlidingToCancel = false
             tvStatus?.text = "🎙️ 聆聽中... 說完整句後請點擊送出"
@@ -555,7 +718,11 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     private fun stopOnDeviceRecordingFlow() {
-        mainHandler.removeCallbacks(safetyTimeoutRunnable)
+        mainHandler.removeCallbacks(onDeviceSafetyTimeoutRunnable)
+        releaseWakeLock()
+        setKeepScreenOn(false)
+        dismissRecordingNotification()
+
         isRecording = false
         triggerHapticFeedback(65)
         pbAudioLevel?.visibility = View.INVISIBLE
@@ -618,7 +785,11 @@ class TypelessInputMethodService : InputMethodService() {
      * Aborts and discards the active audio recording without transcription.
      */
     private fun abortRecordingFlow(statusMessage: String = "已中斷並放棄本次錄音") {
-        mainHandler.removeCallbacks(safetyTimeoutRunnable)
+        mainHandler.removeCallbacks(onDeviceSafetyTimeoutRunnable)
+        releaseWakeLock()
+        setKeepScreenOn(false)
+        dismissRecordingNotification()
+
         isRecording = false
         isSlidingToCancel = false
         audioRecorderManager.cancelRecording()
@@ -638,6 +809,10 @@ class TypelessInputMethodService : InputMethodService() {
      * Aborts the in-flight AI processing job and prevents text injection.
      */
     private fun abortProcessingFlow(statusMessage: String = "已中斷輸入") {
+        releaseWakeLock()
+        setKeepScreenOn(false)
+        dismissRecordingNotification()
+
         activeProcessingJobId++
         isProcessing = false
         triggerHapticFeedback(80)
@@ -762,6 +937,7 @@ class TypelessInputMethodService : InputMethodService() {
             ContextCompat.getColor(this, R.color.ime_primary)
         )
         resetDeleteButtonUi()
+        setKeepScreenOn(false)
     }
 
     private fun safeDelete(file: File) {
@@ -790,21 +966,30 @@ class TypelessInputMethodService : InputMethodService() {
 
     private fun injectText(text: String) {
         val traditionalText = com.typeless.ime.engine.TraditionalChineseConverter.toTraditional(text)
+        lastTranscribedText = traditionalText
         val ic = currentInputConnection
         if (ic != null) {
             ic.commitText(traditionalText, 1)
         } else {
-            Toast.makeText(this, "無法取得焦點輸入框", Toast.LENGTH_SHORT).show()
+            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            val clip = ClipData.newPlainText("MyTypeless Transcribed Text", traditionalText)
+            clipboard?.setPrimaryClip(clip)
+            Toast.makeText(this, "語音辨識完成！已自動複製至剪貼簿：\n$traditionalText", Toast.LENGTH_LONG).show()
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        mainHandler.removeCallbacks(safetyTimeoutRunnable)
+        mainHandler.removeCallbacks(onDeviceSafetyTimeoutRunnable)
         networkMonitor.unregister()
         pixelSttManager.cancel()
         deleteHandler.removeCallbacks(deleteRunnable)
         spaceHandler.removeCallbacks(spaceRunnable)
+        releaseWakeLock()
+        dismissRecordingNotification()
+        try {
+            unregisterReceiver(recordingControlReceiver)
+        } catch (_: Exception) {}
         if (isRecording) {
             audioRecorderManager.cancelRecording()
         }
