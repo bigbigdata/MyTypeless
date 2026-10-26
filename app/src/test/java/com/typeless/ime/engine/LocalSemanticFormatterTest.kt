@@ -64,4 +64,23 @@ class LocalSemanticFormatterTest {
         val output = LocalSemanticFormatter.format(input)
         assertEquals("其實我覺得這個架構方向可以再調整一下。", output)
     }
+
+    @Test
+    fun testChineseHomophoneCorrections() {
+        val input = "明天灰達跟連發客要在線上開會 我們再確認晶原代工的產能布署"
+        val output = LocalSemanticFormatter.format(input)
+        assertTrue(output.contains("輝達"))
+        assertTrue(output.contains("聯發科"))
+        assertTrue(output.contains("晶圓代工"))
+        assertTrue(output.contains("部署"))
+    }
+
+    @Test
+    fun testChineseCustomVocabularyRestoration() {
+        val input = "這週要進行大語言模型的邊緣端推理驗證"
+        val vocab = listOf("大語言模型", "邊緣端")
+        val output = LocalSemanticFormatter.format(input, vocab)
+        assertTrue(output.contains("大語言模型"))
+        assertTrue(output.contains("邊緣端"))
+    }
 }

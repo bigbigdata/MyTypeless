@@ -63,9 +63,25 @@ object LocalSemanticFormatter {
         }
         text = innerFillerPattern.matcher(text).replaceAll(" ").trim()
 
-        // 2. Vocabulary-Guided Restoration for custom terms
+        // 2. Common Traditional Chinese homophone & tech entity corrections
+        text = text.replace("連發客", "聯發科")
+            .replace("聯發客", "聯發科")
+            .replace("蓮發科", "聯發科")
+            .replace("灰達", "輝達")
+            .replace("回達", "輝達")
+            .replace("輝打", "輝達")
+            .replace("金源代工", "晶圓代工")
+            .replace("晶原代工", "晶圓代工")
+            .replace("西制裁", "矽智財")
+            .replace("布署", "部署")
+
+        // Vocabulary-Guided Restoration for custom terms
         for (term in knownVocabulary.take(40)) {
-            if (term.isNotBlank() && term.length >= 2 && term.first().isLetter()) {
+            if (term.isBlank() || term.length < 2) continue
+            if (term.any { it.code > 127 }) {
+                // Chinese term: replace direct casing/traditional form
+                text = text.replace(term, term)
+            } else {
                 val pattern = Pattern.compile("\\b${Pattern.quote(term)}\\b", Pattern.CASE_INSENSITIVE)
                 text = pattern.matcher(text).replaceAll(term)
             }
