@@ -20,7 +20,9 @@ class VocabularyDatabaseHelper(context: Context) :
     companion object {
         private const val TAG = "VocabularyDbHelper"
         const val DATABASE_NAME = "typeless_vocabulary.db"
-        const val DATABASE_VERSION = 2
+        // Keep DATABASE_VERSION = 1 for zero-crash rollback compatibility with main branch.
+        // Auto-harvested garbage cleanup is executed idempotently on startup via purgeAutoHarvestedTerms().
+        const val DATABASE_VERSION = 1
 
         const val TABLE_NAME = "vocabulary"
         const val COLUMN_ID = "id"
@@ -93,10 +95,14 @@ class VocabularyDatabaseHelper(context: Context) :
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        if (oldVersion < 2) {
-            db.execSQL("DELETE FROM $TABLE_NAME WHERE $COLUMN_TAG = 'Auto' AND $COLUMN_IS_DEFAULT = 0")
-            seedDefaults(db)
-        }
+        db.execSQL("DELETE FROM $TABLE_NAME WHERE $COLUMN_TAG = 'Auto' AND $COLUMN_IS_DEFAULT = 0")
+        seedDefaults(db)
+    }
+
+    override fun onDowngrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        // Safe no-throw downgrade: schema between v1 and v2 is identical.
+        // Ensures rolling back the APK never triggers SQLiteException: Can't downgrade database.
+        db.execSQL("DELETE FROM $TABLE_NAME WHERE $COLUMN_TAG = 'Auto' AND $COLUMN_IS_DEFAULT = 0")
     }
 
     /**

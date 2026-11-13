@@ -1,10 +1,13 @@
 package com.typeless.ime.engine
 
+import android.database.sqlite.SQLiteDatabase
 import com.typeless.ime.SettingsManager
 import com.typeless.ime.ai.GeminiAudioClient
+import com.typeless.ime.vocabulary.VocabularyDatabaseHelper
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -142,5 +145,41 @@ class LocalSemanticFormatterTest {
         val longUtterance = "我們今天下午跟輝達還有聯發科的工程團隊討論了下一階段晶圓代工的產能配置與測試排程"
         assertTrue(longUtterance.length > 25)
         assertFalse(HybridPipelineCoordinator.shouldUseLocalFastPath(longUtterance))
+    }
+
+    @Test
+    fun testAudioRequestPayloadDisablesThinkingAndCapsVocab() {
+        val client = GeminiAudioClient(apiKeyProvider = { "test_key" })
+        val largeVocab = (1..60).map { "AudioTerm_$it" }
+        val jsonStr = client.buildAudioRequestJson("ZHVtbXlJbmxpbmVEYXRh", largeVocab)
+        val root = JSONObject(jsonStr)
+
+        val genConfig = root.getJSONObject("generationConfig")
+        assertTrue("maxOutputTokens must be <= 1024", genConfig.getInt("maxOutputTokens") <= 1024)
+        val thinkingConfig = genConfig.getJSONObject("thinkingConfig")
+        assertEquals(0, thinkingConfig.getInt("thinkingBudget"))
+
+        val sysInstruction = root.getJSONObject("system_instruction")
+            .getJSONArray("parts")
+            .getJSONObject(0)
+            .getString("text")
+        assertTrue(sysInstruction.contains("AudioTerm_30"))
+        assertFalse(sysInstruction.contains("AudioTerm_31"))
+    }
+
+    @Test
+    fun testDatabaseRollbackCompatibility() {
+        // 1. DATABASE_VERSION must remain 1 so rolling back to main never triggers SQLiteException
+        assertEquals(1, VocabularyDatabaseHelper.DATABASE_VERSION)
+
+        // 2. VocabularyDatabaseHelper must explicitly override onDowngrade(SQLiteDatabase, Int, Int)
+        val onDowngradeMethod = VocabularyDatabaseHelper::class.java.getDeclaredMethod(
+            "onDowngrade",
+            SQLiteDatabase::class.java,
+            Int::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType
+        )
+        assertNotNull("VocabularyDatabaseHelper must override onDowngrade for safe rollback", onDowngradeMethod)
+        assertEquals(VocabularyDatabaseHelper::class.java, onDowngradeMethod.declaringClass)
     }
 }

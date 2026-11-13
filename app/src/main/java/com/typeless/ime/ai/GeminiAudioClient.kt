@@ -309,7 +309,7 @@ class GeminiAudioClient(
         return root.toString()
     }
 
-    private fun buildAudioRequestJson(audioBase64: String, knownVocabulary: List<String>? = null): String {
+    internal fun buildAudioRequestJson(audioBase64: String, knownVocabulary: List<String>? = null): String {
         val root = JSONObject()
 
         val promptText = buildSystemPrompt(knownVocabulary)
