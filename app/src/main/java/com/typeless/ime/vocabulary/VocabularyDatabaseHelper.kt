@@ -20,7 +20,7 @@ class VocabularyDatabaseHelper(context: Context) :
     companion object {
         private const val TAG = "VocabularyDbHelper"
         const val DATABASE_NAME = "typeless_vocabulary.db"
-        const val DATABASE_VERSION = 1
+        const val DATABASE_VERSION = 2
 
         const val TABLE_NAME = "vocabulary"
         const val COLUMN_ID = "id"
@@ -93,7 +93,18 @@ class VocabularyDatabaseHelper(context: Context) :
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // Handle migrations in future versions
+        if (oldVersion < 2) {
+            db.execSQL("DELETE FROM $TABLE_NAME WHERE $COLUMN_TAG = 'Auto' AND $COLUMN_IS_DEFAULT = 0")
+            seedDefaults(db)
+        }
+    }
+
+    /**
+     * Purges any previously auto-harvested noisy terms while preserving default seeds and manual entries.
+     */
+    fun purgeAutoHarvestedTerms(): Int {
+        val db = writableDatabase
+        return db.delete(TABLE_NAME, "$COLUMN_TAG = ? AND $COLUMN_IS_DEFAULT = 0", arrayOf("Auto"))
     }
 
     private fun seedDefaults(db: SQLiteDatabase) {

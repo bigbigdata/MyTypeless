@@ -82,6 +82,8 @@ class SettingsActivity : AppCompatActivity() {
 
     private fun updateVocabStats() {
         val count = vocabularyRepository.getCount()
-        tvVocabStats.text = "目前已收錄 $count 個個人專有名詞與高頻術語"
+        val callsToday = settingsManager.dailyGeminiCalls
+        val tokensToday = settingsManager.dailyGeminiTokens
+        tvVocabStats.text = "目前已收錄 $count 個專有名詞｜今日雲端 Gemini：$callsToday 次 ($tokensToday tok)"
     }
 }

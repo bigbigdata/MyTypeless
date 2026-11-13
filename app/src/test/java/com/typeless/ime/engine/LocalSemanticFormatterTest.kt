@@ -1,6 +1,10 @@
 package com.typeless.ime.engine
 
+import com.typeless.ime.SettingsManager
+import com.typeless.ime.ai.GeminiAudioClient
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -82,5 +86,61 @@ class LocalSemanticFormatterTest {
         val output = LocalSemanticFormatter.format(input, vocab)
         assertTrue(output.contains("大語言模型"))
         assertTrue(output.contains("邊緣端"))
+    }
+
+    @Test
+    fun testDefaultModelIsFlashLite() {
+        assertEquals("gemini-2.5-flash-lite", SettingsManager.DEFAULT_MODEL)
+        assertEquals("gemini-2.5-flash-lite", GeminiAudioClient.DEFAULT_MODEL)
+    }
+
+    @Test
+    fun testLocalAdaptiveEngineHasZeroCloudDependencies() {
+        val clazz = LocalAdaptivePolishingEngine::class.java
+        val fieldTypes = clazz.declaredFields.map { it.type.name }
+        for (typeName in fieldTypes) {
+            assertFalse("LocalAdaptivePolishingEngine must NEVER hold GeminiAudioClient", typeName.contains("GeminiAudioClient"))
+            assertFalse("LocalAdaptivePolishingEngine must NEVER hold OkHttpClient", typeName.contains("OkHttpClient"))
+            assertFalse("LocalAdaptivePolishingEngine must NEVER hold NetworkStateMonitor", typeName.contains("NetworkStateMonitor"))
+        }
+    }
+
+    @Test
+    fun testGeminiRequestPayloadDisablesThinkingAndCapsVocab() {
+        val client = GeminiAudioClient(apiKeyProvider = { "test_key" })
+        val largeVocab = (1..60).map { "Term_$it" }
+        val jsonStr = client.buildTextRequestJson("那個 呃 請幫我測試一下這段文字", largeVocab)
+        val root = JSONObject(jsonStr)
+
+        // 1. Verify thinkingBudget is strictly 0
+        val genConfig = root.getJSONObject("generationConfig")
+        assertTrue("maxOutputTokens must be <= 1024", genConfig.getInt("maxOutputTokens") <= 1024)
+        val thinkingConfig = genConfig.getJSONObject("thinkingConfig")
+        assertEquals(0, thinkingConfig.getInt("thinkingBudget"))
+
+        // 2. Verify vocabulary injection is strictly capped at 30 terms
+        val sysInstruction = root.getJSONObject("system_instruction")
+            .getJSONArray("parts")
+            .getJSONObject(0)
+            .getString("text")
+        assertTrue(sysInstruction.contains("Term_30"))
+        assertFalse("Vocabulary beyond 30 terms must not be injected into prompt", sysInstruction.contains("Term_31"))
+    }
+
+    @Test
+    fun testOptionBFastPath25CharsRouting() {
+        // <= 25 chars everyday speech (even with leading fillers) -> Local Fast-Path (true)
+        assertTrue(HybridPipelineCoordinator.shouldUseLocalFastPath("好的謝謝"))
+        assertTrue(HybridPipelineCoordinator.shouldUseLocalFastPath("那個 呃 明天早上十點我們在線上開會討論專案進度"))
+        assertTrue(HybridPipelineCoordinator.shouldUseLocalFastPath("已經把 PR merge 到 main branch 了"))
+
+        // Structured list or transition keywords even if short -> Cloud Gemini (false)
+        assertFalse(HybridPipelineCoordinator.shouldUseLocalFastPath("今天有兩個重點 第一個是部署 第二個是測試"))
+        assertFalse(HybridPipelineCoordinator.shouldUseLocalFastPath("沒問題 另外 明天早上記得開會"))
+
+        // Long utterances (> 25 chars after stripping fillers) -> Cloud Gemini (false)
+        val longUtterance = "我們今天下午跟輝達還有聯發科的工程團隊討論了下一階段晶圓代工的產能配置與測試排程"
+        assertTrue(longUtterance.length > 25)
+        assertFalse(HybridPipelineCoordinator.shouldUseLocalFastPath(longUtterance))
     }
 }

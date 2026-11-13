@@ -18,6 +18,12 @@ class VocabularyRepository private constructor(context: Context) {
 
     private val dbHelper = VocabularyDatabaseHelper(context.applicationContext)
 
+    init {
+        try {
+            dbHelper.purgeAutoHarvestedTerms()
+        } catch (_: Exception) {}
+    }
+
     companion object {
         private const val TAG = "VocabularyRepository"
         private const val DEFAULT_WHISPER_PREFIX = "繁體中文日常與工作語音，常見詞："
@@ -115,23 +121,21 @@ class VocabularyRepository private constructor(context: Context) {
 
     /**
      * Retrieves top vocabulary terms for Gemini System Prompt injection.
-     * Supplies up to 150 high-frequency & recently used terms for fuzzy homophone correction.
+     * Capped at 30 high-frequency & recently used terms to keep prompt tokens compact.
      */
-    fun getAllTermsForGemini(limit: Int = 150): List<String> {
+    fun getAllTermsForGemini(limit: Int = 30): List<String> {
         return dbHelper.getTopTerms(limit = limit)
     }
 
     /**
-     * Asynchronously:
-     * 1. Inspects the final text for existing custom vocabulary hits and increments frequency.
-     * 2. Auto-Harvests new English terms/acronyms and Traditional Chinese proper nouns/domain entities.
+     * Asynchronously inspects the final text for existing custom/curated vocabulary hits
+     * and increments their usage frequency (without polluting the database with auto-split everyday words).
      */
     fun recordUsageAsync(outputText: String) {
         if (outputText.isBlank()) return
 
         thread(start = true, name = "VocabUsageTrackerThread") {
             try {
-                // Step 1: Update existing vocabulary frequencies
                 val allTerms = dbHelper.getAllTerms()
                 var matchCount = 0
                 for (term in allTerms) {
@@ -148,52 +152,10 @@ class VocabularyRepository private constructor(context: Context) {
                     }
                 }
 
-                // Step 2a: Auto-Harvest English words & technical acronyms
-                val wordRegex = Regex("[a-zA-Z0-9#+.-]{2,}")
-                val matches = wordRegex.findAll(outputText)
-                var newHarvestCount = 0
-
-                for (m in matches) {
-                    val rawWord = m.value.trim(',', '.', '!', '?', ';', ':', '"', '\'', '(', ')', '[', ']')
-                    if (rawWord.length < 2 || rawWord.length > 32) continue
-                    // Skip pure digits (e.g. "123", "2026")
-                    if (rawWord.all { it.isDigit() }) continue
-                    // Skip common English stop/function words
-                    if (ENGLISH_STOP_WORDS.contains(rawWord.lowercase())) continue
-
-                    val id = dbHelper.insertOrIncrement(rawWord, tag = "Auto")
-                    if (id > 0) {
-                        newHarvestCount++
-                    }
-                }
-
-                // Step 2b: Auto-Harvest Traditional Chinese proper nouns and domain entities
-                try {
-                    val iterator = BreakIterator.getWordInstance(Locale.TRADITIONAL_CHINESE)
-                    iterator.setText(outputText)
-                    var start = iterator.first()
-                    var end = iterator.next()
-                    while (end != BreakIterator.DONE) {
-                        val rawWord = outputText.substring(start, end).trim()
-                        if (rawWord.length in 2..6 && rawWord.all { it.isCjk() }) {
-                            if (!CHINESE_STOP_WORDS.contains(rawWord)) {
-                                val id = dbHelper.insertOrIncrement(rawWord, tag = "Auto")
-                                if (id > 0) {
-                                    newHarvestCount++
-                                }
-                            }
-                        }
-                        start = end
-                        end = iterator.next()
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Chinese word harvesting encounter error", e)
-                }
-
                 if (BuildConfig.DEBUG) {
                     Log.d(
                         TAG,
-                        "Usage tracking finished: matched $matchCount existing, auto-harvested/updated $newHarvestCount terms"
+                        "Usage tracking finished: matched $matchCount existing curated/manual terms"
                     )
                 }
             } catch (e: Exception) {

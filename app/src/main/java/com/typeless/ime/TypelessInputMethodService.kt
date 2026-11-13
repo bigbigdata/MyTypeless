@@ -150,14 +150,14 @@ class TypelessInputMethodService : InputMethodService() {
         settingsManager = SettingsManager(this)
         vocabularyRepository = VocabularyRepository.getInstance(this)
         groqClient = GroqWhisperClient { settingsManager.groqApiKey }
-        geminiClient = GeminiAudioClient { settingsManager.apiKey }
+        geminiClient = GeminiAudioClient(
+            apiKeyProvider = { settingsManager.apiKey },
+            onUsageRecorded = { tokens -> settingsManager.recordGeminiUsage(tokens) }
+        )
         networkMonitor = NetworkStateMonitor(this)
         pixelSttManager = PixelStreamingSttManager(this)
         localPolishingEngine = LocalAdaptivePolishingEngine(
-            context = this,
-            geminiClient = geminiClient,
-            networkMonitor = networkMonitor,
-            settingsManager = settingsManager
+            context = this
         )
         hybridCoordinator = HybridPipelineCoordinator(
             context = this,
@@ -747,7 +747,7 @@ class TypelessInputMethodService : InputMethodService() {
 
         thread(start = true, name = "OnDevicePolishingThread") {
             val polishStartTime = System.currentTimeMillis()
-            val terms = vocabularyRepository.getAllTermsForGemini(limit = 40)
+            val terms = vocabularyRepository.getAllTermsForGemini(limit = 30)
             val polishResult = localPolishingEngine.polish(rawText, terms)
             val polishDurationMs = System.currentTimeMillis() - polishStartTime
             val totalMs = asrDurationMs + polishDurationMs
@@ -761,7 +761,7 @@ class TypelessInputMethodService : InputMethodService() {
 
             mainHandler.post {
                 injectText(finalText)
-                val badge = "📱 端側完成｜ASR: ${asrDurationMs}ms ➔ 潤飾: ${polishDurationMs}ms (總計 ${totalMs}ms)"
+                val badge = "📱 純端側完成 (0 雲端 tok)｜ASR: ${asrDurationMs}ms ➔ 潤飾: ${polishDurationMs}ms"
                 tvStatus?.text = badge
                 Toast.makeText(this@TypelessInputMethodService, badge, Toast.LENGTH_SHORT).show()
                 triggerHapticFeedback(40)

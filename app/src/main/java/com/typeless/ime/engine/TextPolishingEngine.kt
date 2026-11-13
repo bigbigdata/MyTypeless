@@ -21,7 +21,7 @@ interface TextPolishingEngine {
 }
 
 /**
- * Cloud LLM Polishing: Google Gemini 2.5 Flash.
+ * Cloud LLM Polishing: Google Gemini 2.5 Flash-Lite.
  */
 class GeminiCloudPolishingEngine(
     private val geminiClient: GeminiAudioClient,
@@ -29,7 +29,7 @@ class GeminiCloudPolishingEngine(
     private val isKeyConfigured: () -> Boolean
 ) : TextPolishingEngine {
 
-    override val name: String = "Gemini Cloud (2.5 Flash)"
+    override val name: String = "Gemini Cloud (2.5 Flash-Lite)"
     override val isAvailable: Boolean get() = isKeyConfigured()
     override val isOfflineCapable: Boolean = false
 
@@ -57,28 +57,23 @@ class RuleBasedPolishingEngine : TextPolishingEngine {
 
 /**
  * Dynamic Adaptive On-Device Polishing Engine:
- * 1. Hybrid Assist: If online and API key configured, invokes Cloud Gemini 2.5 Flash for LLM-level semantic resolution.
- * 2. Tier 1: Probes system Android AICore (Gemini Nano) for hardware-accelerated NPU execution.
- * 3. Tier 2: Probes Google MediaPipe Gemma 2 (2B) if model assets are mounted.
- * 4. Tier 3: Falls back to LocalSemanticFormatter (Paragraphs + Numbered/Bullet Lists + Pangu) for guaranteed offline excellence.
+ * Strictly 100% On-Device / Offline (physically isolated from any cloud client):
+ * 1. Tier 1: Probes system Android AICore (Gemini Nano) for hardware-accelerated NPU execution.
+ * 2. Tier 2: Probes Google MediaPipe Gemma 2 (2B) if model assets are mounted.
+ * 3. Tier 3: Executes LocalSemanticFormatter (Paragraphs + Numbered/Bullet Lists + Pangu) for guaranteed offline excellence.
  */
 class LocalAdaptivePolishingEngine(
     private val context: Context,
-    private val geminiClient: GeminiAudioClient? = null,
-    private val networkMonitor: NetworkStateMonitor? = null,
-    private val settingsManager: com.typeless.ime.SettingsManager? = null,
     private val ruleEngine: RuleBasedPolishingEngine = RuleBasedPolishingEngine()
 ) : TextPolishingEngine {
 
     companion object {
         private const val TAG = "LocalAdaptiveEngine"
-        private const val CLOUD_ASSIST_TIMEOUT_MS = 3500L
     }
 
     override val name: String
         get() {
             return when {
-                networkMonitor?.isOnline == true && settingsManager?.hasApiKey == true && geminiClient != null -> "Gemini Enhanced (Hybrid Semantic)"
                 isAiCoreSupported() -> "Gemini Nano (AICore NPU)"
                 isGemmaModelAvailable() -> "Gemma 2 2B (MediaPipe)"
                 else -> "Local Semantic Formatter"
@@ -110,26 +105,7 @@ class LocalAdaptivePolishingEngine(
     }
 
     override fun polish(rawText: String, knownVocabulary: List<String>): Result<String> {
-        Log.i(TAG, "Polishing with engine: $name (knownVocab size: ${knownVocabulary.size})")
-
-        // 1. If online and key configured, try Gemini 2.5 Flash for deep semantic structuring
-        if (networkMonitor?.isOnline == true && settingsManager?.hasApiKey == true && geminiClient != null) {
-            try {
-                val cloudResult = geminiClient.polishText(rawText, settingsManager.model, knownVocabulary)
-                if (cloudResult.isSuccess) {
-                    val text = cloudResult.getOrThrow()
-                    if (text.isNotBlank()) {
-                        Log.i(TAG, "Gemini Cloud successfully polished and structured text")
-                        return Result.success(TraditionalChineseConverter.toTraditional(text))
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Gemini online assist failed or timed out: ${e.message}, falling back to local semantic formatter")
-            }
-        }
-
-        // 2. Offline / Local fallback: High-precision deterministic local structuring (paragraphs, numbered/bullet lists, clause punctuation)
-        val formatted = LocalSemanticFormatter.format(rawText, knownVocabulary)
-        return Result.success(formatted)
+        Log.i(TAG, "Polishing with strictly offline engine: $name (knownVocab size: ${knownVocabulary.size})")
+        return ruleEngine.polish(rawText, knownVocabulary)
     }
 }
