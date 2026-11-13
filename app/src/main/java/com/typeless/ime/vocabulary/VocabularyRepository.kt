@@ -3,6 +3,8 @@ package com.typeless.ime.vocabulary
 import android.content.Context
 import android.util.Log
 import com.typeless.ime.BuildConfig
+import java.text.BreakIterator
+import java.util.Locale
 import kotlin.concurrent.thread
 
 /**
@@ -10,11 +12,17 @@ import kotlin.concurrent.thread
  *
  * Coordinates vocabulary persistence, dynamic prompt bias generation for Whisper,
  * known-term extraction for Gemini, and automatic harvesting (Auto-Discovery)
- * of new technical terminology and code-switching expressions.
+ * of new technical terminology, proper nouns, and code-switching expressions.
  */
 class VocabularyRepository private constructor(context: Context) {
 
     private val dbHelper = VocabularyDatabaseHelper(context.applicationContext)
+
+    init {
+        try {
+            dbHelper.purgeAutoHarvestedTerms()
+        } catch (_: Exception) {}
+    }
 
     companion object {
         private const val TAG = "VocabularyRepository"
@@ -38,6 +46,35 @@ class VocabularyRepository private constructor(context: Context) {
             "he", "she", "we", "they", "me", "him", "her", "us", "them", "my",
             "your", "his", "their", "our", "what", "which", "who", "whom", "ok",
             "yes", "yeah", "sure", "hi", "hello", "good", "well", "fine"
+        )
+
+        /**
+         * Common Traditional Chinese function words, particles, pronouns, and high-frequency generic terms
+         * to exclude from auto-harvesting (only distinct domain terminology, proper nouns, and entity phrases
+         * should be harvested).
+         */
+        private val CHINESE_STOP_WORDS = hashSetOf(
+            // 代詞 / 指示詞
+            "我們", "你們", "他們", "她們", "自己", "大家", "這個", "那個", "這些", "那些",
+            "什麼", "甚麼", "哪裡", "那裡", "這裡", "怎麼", "如何", "這樣", "那樣", "某個",
+            // 助詞 / 結構詞 / 贅字 / 處所
+            "的話", "等等", "之類", "之後", "之前", "之中", "之間", "以外", "以上", "以下",
+            "來說", "而言", "其實", "基本上", "就是", "那個", "這個", "時候", "地方", "東西",
+            // 介系詞 / 連接詞
+            "因為", "所以", "如果", "雖然", "但是", "不過", "而且", "並且", "或者", "還是",
+            "以及", "關於", "對於", "透過", "根據", "按照", "儘管", "另外", "除了", "還有",
+            // 常見日常動詞 / 助動詞 / 泛用詞
+            "可以", "能夠", "應該", "必須", "需要", "可能", "覺得", "認為", "知道", "看到",
+            "聽到", "想要", "進行", "處理", "完成", "開始", "確認", "討論", "提供", "使用",
+            "利用", "出現", "發現", "產生", "造成", "影響", "包括", "包含", "表示", "說明",
+            "報告", "檢查", "準備", "希望", "決定", "幫忙", "協助", "麻煩",
+            // 時間 / 頻率副詞
+            "今天", "明天", "昨天", "現在", "目前", "最近", "剛剛", "稍後", "之後", "以前",
+            "以後", "隨時", "隨即", "一直", "已經", "正在", "曾經", "將會", "馬上", "立刻",
+            // 程度 / 數量詞
+            "一個", "一些", "很多", "非常", "十分", "比較", "特別", "稍微", "大概", "幾乎",
+            "全部", "所有", "第一", "第二", "第三", "最後", "首先", "其次", "重點", "項目",
+            "問題", "情況", "內容", "部分", "階段"
         )
 
         @Volatile
@@ -84,23 +121,21 @@ class VocabularyRepository private constructor(context: Context) {
 
     /**
      * Retrieves top vocabulary terms for Gemini System Prompt injection.
-     * Supplies up to 150 high-frequency & recently used terms for fuzzy homophone correction.
+     * Capped at 30 high-frequency & recently used terms to keep prompt tokens compact.
      */
-    fun getAllTermsForGemini(limit: Int = 150): List<String> {
+    fun getAllTermsForGemini(limit: Int = 30): List<String> {
         return dbHelper.getTopTerms(limit = limit)
     }
 
     /**
-     * Asynchronously:
-     * 1. Inspects the final text for existing custom vocabulary hits and increments frequency.
-     * 2. Auto-Harvests new English terms/acronyms/code-switching keywords and persists them with tag "Auto".
+     * Asynchronously inspects the final text for existing custom/curated vocabulary hits
+     * and increments their usage frequency (without polluting the database with auto-split everyday words).
      */
     fun recordUsageAsync(outputText: String) {
         if (outputText.isBlank()) return
 
         thread(start = true, name = "VocabUsageTrackerThread") {
             try {
-                // Step 1: Update existing vocabulary frequencies
                 val allTerms = dbHelper.getAllTerms()
                 var matchCount = 0
                 for (term in allTerms) {
@@ -117,35 +152,23 @@ class VocabularyRepository private constructor(context: Context) {
                     }
                 }
 
-                // Step 2: Auto-Harvest new words (code-switching expressions, acronyms, technical terms)
-                val wordRegex = Regex("[a-zA-Z0-9#+.-]{2,}")
-                val matches = wordRegex.findAll(outputText)
-                var newHarvestCount = 0
-
-                for (m in matches) {
-                    val rawWord = m.value.trim(',', '.', '!', '?', ';', ':', '"', '\'', '(', ')', '[', ']')
-                    if (rawWord.length < 2 || rawWord.length > 32) continue
-                    // Skip pure digits (e.g. "123", "2026")
-                    if (rawWord.all { it.isDigit() }) continue
-                    // Skip common English stop/function words
-                    if (ENGLISH_STOP_WORDS.contains(rawWord.lowercase())) continue
-
-                    val id = dbHelper.insertOrIncrement(rawWord, tag = "Auto")
-                    if (id > 0) {
-                        newHarvestCount++
-                    }
-                }
-
                 if (BuildConfig.DEBUG) {
                     Log.d(
                         TAG,
-                        "Usage tracking finished: matched $matchCount existing, auto-harvested/updated $newHarvestCount terms"
+                        "Usage tracking finished: matched $matchCount existing curated/manual terms"
                     )
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to record vocabulary usage", e)
             }
         }
+    }
+
+    private fun Char.isCjk(): Boolean {
+        val block = Character.UnicodeBlock.of(this)
+        return block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS ||
+                block == Character.UnicodeBlock.CJK_COMPATIBILITY_IDEOGRAPHS ||
+                block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_A
     }
 
     fun getAllItems(searchQuery: String? = null): List<VocabularyItem> {

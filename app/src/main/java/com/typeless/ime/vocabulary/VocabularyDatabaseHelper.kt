@@ -20,6 +20,8 @@ class VocabularyDatabaseHelper(context: Context) :
     companion object {
         private const val TAG = "VocabularyDbHelper"
         const val DATABASE_NAME = "typeless_vocabulary.db"
+        // Keep DATABASE_VERSION = 1 for zero-crash rollback compatibility with main branch.
+        // Auto-harvested garbage cleanup is executed idempotently on startup via purgeAutoHarvestedTerms().
         const val DATABASE_VERSION = 1
 
         const val TABLE_NAME = "vocabulary"
@@ -93,7 +95,22 @@ class VocabularyDatabaseHelper(context: Context) :
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // Handle migrations in future versions
+        db.execSQL("DELETE FROM $TABLE_NAME WHERE $COLUMN_TAG = 'Auto' AND $COLUMN_IS_DEFAULT = 0")
+        seedDefaults(db)
+    }
+
+    override fun onDowngrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        // Safe no-throw downgrade: schema between v1 and v2 is identical.
+        // Ensures rolling back the APK never triggers SQLiteException: Can't downgrade database.
+        db.execSQL("DELETE FROM $TABLE_NAME WHERE $COLUMN_TAG = 'Auto' AND $COLUMN_IS_DEFAULT = 0")
+    }
+
+    /**
+     * Purges any previously auto-harvested noisy terms while preserving default seeds and manual entries.
+     */
+    fun purgeAutoHarvestedTerms(): Int {
+        val db = writableDatabase
+        return db.delete(TABLE_NAME, "$COLUMN_TAG = ? AND $COLUMN_IS_DEFAULT = 0", arrayOf("Auto"))
     }
 
     private fun seedDefaults(db: SQLiteDatabase) {

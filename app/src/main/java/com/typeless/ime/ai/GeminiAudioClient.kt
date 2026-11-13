@@ -24,88 +24,62 @@ import kotlin.concurrent.thread
  * 
  * Eliminates redundant ListModels queries and aggressive retry loops, terminating immediately on 429 to safeguard quota.
  */
-class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
+class GeminiAudioClient(
+    private val apiKeyProvider: () -> String?,
+    private val onUsageRecorded: ((Int) -> Unit)? = null
+) {
 
     companion object {
         private const val TAG = "GeminiAudioClient"
-        const val DEFAULT_MODEL = "gemini-2.5-flash"
+        const val DEFAULT_MODEL = "gemini-2.5-flash-lite"
+        internal const val MAX_INJECTED_VOCAB_TERMS = 30
+        internal const val THINKING_BUDGET = 0
+        internal const val MAX_OUTPUT_TOKENS = 1024
+        const val RATE_LIMIT_COOLDOWN_MS = 60_000L
 
-        private const val SYSTEM_PROMPT = """你是一個極速、精準的逐字稿潤飾與文法排版引擎。輸入為語音辨識輸出的逐字稿（可能是純中文、純英文或中英夾雜說話）。
-請嚴格遵循以下核心規範輸出：
+        private val fillerPrefixRegex = Regex("^[，,。？?\\s]*(呃|啊|那個|就是說|然後其實|嗯)[，,。？?\\s]*")
+        private val inlineFillerRegex = Regex("([，,]\\s*(呃|啊|那個|就是說|嗯)\\s*)")
 
-1. 【繁體中文規範】：所有中文輸出必須一律強制使用「繁體中文（正體中文，台灣習慣）」，絕對嚴禁輸出任何簡體中文！
-2. 【文字鏡像原則（Immutable Tokens，絕對禁止翻譯）】：
-   - 輸入中出現的任何英文字元（包含日常單字、名詞、動詞、形容詞、品牌名稱、片語如 PR, deploy, meeting, sync, check, brunch, chill 等）一律視為「不可變更的固定記號」。
-   - 說中文就輸出中文，說英文就輸出英文。絕對嚴禁將任何英文單字或片語意譯或翻譯為中文同義詞！必須原汁原味精確保留原文與慣用大小寫。
-3. 【語篇結構分段與雙語智慧條列規範】：
-   - 【主題切換與段落空行（\n\n）】：
-     當語意出現明顯話題躍遷、視角切換或轉折詞時，必須插入標準空行（\n\n）分成獨立段落：
-     * 中文轉折詞：例如「另外...」、「除此之外...」、「關於下一點...」、「總之/總結來說...」、「另一方面...」等。
-     * 英文轉折詞：例如 "Additionally, ...", "Furthermore, ...", "On the other hand, ...", "Regarding [topic], ...", "In conclusion, ...", "Moving on to..." 等。
-   - 【序號條列清單（1. 2. 3.）】：
-     口述中包含明確先後順序或序數詞時，自動轉換為編號清單（1. 2. 3. ），並自動去除「第一個是」、「Number one is」等口語贅詞：
-     * 中文序列詞：例如「第一、第二、第三」、「首先、其次、最後」、「第一個是、第二個是」等。
-     * 英文序列詞：例如 "First, ... Second, ... Third, ...", "First of all, ... Next, ... Finally, ...", "Number one, ... Number two, ..." 等。
-   - 【無序重點清單（- 項目）】：
-     口述列舉重點、待辦或多個要點（無明確序號）時，自動轉換為 Markdown 減號清單（- 項目）：
-     * 中文引導：例如「有幾個重點」、「包含以下項目」、「有幾點注意事項」等。
-     * 英文引導：例如 "Here are the key points:", "Action items include:", "Key takeaways:" 等。
-     * 條列各項目英文開頭字母請大寫。
-   - 【清單引導句冒號規範】：
-     清單前置引導句末尾自動附上正確冒號：中文前方用全形冒號「：」，英文前方用半形冒號加空格「: 」。
-   - 【簡短短語維持單行】：
-     日常簡短對話或單一指令（無論中英文）維持單行連貫輸出，不切碎。
-4. 【去除贅字口語】：
-   - 僅去除口語贅字與停頓填補詞（例如：呃、啊、那個、就是說、然後其實、嗯、like, you know, um, uh 等）。
-   - 修順句子文法，適當補上正確標點符號。
-5. 【示範範例 (Few-Shot Examples)】：
-   - 範例 1（簡短中英日常）：
-     輸入：那個明天早上 meeting 要記得 review PR 然後 deploy 到 production
+        private const val SYSTEM_PROMPT = """你是極速繁體中文與中英雙語逐字稿潤飾引擎。請嚴格遵守：
+1. 【台灣繁體中文】：一律輸出台灣習慣繁體中文，嚴禁簡體字。
+2. 【同音字與科技詞校正】：
+   - 依語境區分：在/再、的/得/地、做/作、需/須、紀錄/記錄，一律用「部署」、「身分」。
+   - 科技同音校正：聯發科、輝達、鴻海、矽智財、晶圓代工、封測、伺服器、資安、機房。
+3. 【英文鏡像不翻譯】：輸入中的任何英文單字或縮寫（如 PR, deploy, meeting, sync, check, branch 等）必須原樣保留並維持正確大小寫，嚴禁翻譯成中文。
+4. 【智慧分段與條列】：
+   - 遇話題轉折詞（另外、除此之外、總之、Additionally, Furthermore, In conclusion 等）插入空行（\n\n）分段。
+   - 遇序數詞（第一/第二/第三、首先/其次/最後、First/Second/Third）轉為編號清單（1. 2. 3.），引導句末加冒號（中文「：」、英文「:」）。
+   - 遇多項重點列舉（有幾個重點、Here are the key takeaways 等）轉為減號清單（- 項目）。
+   - 一般日常短句維持單行連貫。
+5. 【去贅字且禁意譯】：僅去除口語贅詞（呃、啊、那個、就是說、嗯、um, uh, like, you know），修順標點，保留原意與語氣，嚴禁改寫或總結。
+6. 【示範】：
+   - 輸入：那個明天早上 meeting 要記得 review PR 然後 deploy 到 production
      輸出：明天早上 meeting 要記得 review PR，然後 deploy 到 production。
-   - 範例 2（中文序號條列）：
-     輸入：今天有三個重點要同步 第一個是 API 規格已經 freeze 了 第二個是 staging 環境已經 deploy 完成 第三個是下週二要上 production
+   - 輸入：今天有三個重點要同步 第一個是 API 規格已經 freeze 了 第二個是 staging 環境已經 deploy 完成 第三個是下週二要上 production
      輸出：今天有三個重點要同步：
-     1. API 規格已經 freeze。
-     2. Staging 環境已經 deploy 完成。
-     3. 下週二要上 production。
-   - 範例 3（英文序號條列）：
-     輸入：we have three action items today first review the PR second deploy to staging third run benchmark
-     輸出：We have three action items today:
-     1. Review the PR.
-     2. Deploy to staging.
-     3. Run benchmark.
-   - 範例 4（中英混用多段落轉折）：
-     輸入：目前這個 issue 我們已經在 staging 驗證過了 基本上沒什麼問題 另外 關於下週一的 sprint planning 我們預計會把重心放在重構 API 模組
-     輸出：目前這個 issue 我們已經在 staging 驗證過了，基本上沒什麼問題。
-
-     另外，關於下週一的 sprint planning，我們預計會把重心放在重構 API 模組。
-   - 範例 5（英文無序重點清單）：
-     輸入：here are the key takeaways from the discussion we fixed the memory leak and resolved connection timeout
-     輸出：Here are the key takeaways:
-     - Fixed the memory leak
-     - Resolved connection timeout
-   - 範例 6（英文轉折多段落）：
-     輸入：the backend release is scheduled for tomorrow morning everything looks stable additionally please notify the mobile team once it is deployed
-     輸出：The backend release is scheduled for tomorrow morning, everything looks stable.
-
-     Additionally, please notify the mobile team once it is deployed.
-6. 【絕對禁止意譯】：
-   - 不要用你自己的方式重新表達整句話的意思！這不是總結，保留使用者的原話語意與口氣。
-7. 【輸出格式】：
-   - 僅直接輸出潤飾與排版後的純文字內容。
-   - 嚴禁包含任何引號、問候語、Markdown 程式碼區塊標記（```）或多餘解釋。"""
+1. API 規格已經 freeze。
+2. Staging 環境已經 deploy 完成。
+3. 下週二要上 production。
+7. 【純文字輸出】：僅直接輸出結果，嚴禁加引號、Markdown 程式碼區塊（```）或任何解釋。"""
     }
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
-        .writeTimeout(35, TimeUnit.SECONDS)
-        .readTimeout(35, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
         .build()
+
+    @Volatile
+    private var rateLimitCooldownUntilMs: Long = 0L
+
+    val isInRateLimitCooldown: Boolean
+        get() = System.currentTimeMillis() < rateLimitCooldownUntilMs
 
     /**
      * Asynchronously pre-warms the connection pool when the user starts speaking.
      */
     fun prewarmConnection() {
+        if (isInRateLimitCooldown) return
         val apiKey = apiKeyProvider() ?: return
         thread(start = true, name = "GeminiPrewarmThread") {
             try {
@@ -147,6 +121,10 @@ class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
             return Result.success("")
         }
 
+        if (isInRateLimitCooldown) {
+            return Result.failure(RateLimitException("Gemini Free Tier 429 cooldown active"))
+        }
+
         val targetModel = preferredModel?.takeIf { it.isNotBlank() } ?: DEFAULT_MODEL
         val jsonPayload = buildTextRequestJson(rawText, knownVocabulary)
 
@@ -154,7 +132,8 @@ class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
             val polished = executeCallWithRetry(targetModel, apiKey, jsonPayload)
             Result.success(polished)
         } catch (e: RateLimitException) {
-            Log.w(TAG, "Gemini quota exceeded (HTTP 429), aborting call to protect quota: ${e.message}")
+            rateLimitCooldownUntilMs = System.currentTimeMillis() + RATE_LIMIT_COOLDOWN_MS
+            Log.w(TAG, "Gemini quota exceeded (HTTP 429), activating 60s local fallback cooldown: ${e.message}")
             Result.failure(e)
         } catch (e: Exception) {
             Log.e(TAG, "Gemini text polishing exception", e)
@@ -238,6 +217,17 @@ class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
             }
 
             val jsonResponse = JSONObject(responseBody)
+            val usage = jsonResponse.optJSONObject("usageMetadata")
+            if (usage != null) {
+                val promptToks = usage.optInt("promptTokenCount", 0)
+                val candToks = usage.optInt("candidatesTokenCount", 0)
+                val thoughtToks = usage.optInt("thoughtsTokenCount", 0)
+                val totalToks = usage.optInt("totalTokenCount", promptToks + candToks + thoughtToks)
+                onUsageRecorded?.invoke(totalToks)
+            } else {
+                onUsageRecorded?.invoke(0)
+            }
+
             val candidates = jsonResponse.optJSONArray("candidates")
             if (candidates == null || candidates.length() == 0) {
                 throw IOException("API returned no candidate text: $responseBody")
@@ -256,25 +246,35 @@ class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
     }
 
     /**
-     * Composes the system prompt, dynamically appending custom vocabulary and fuzzy homophone
-     * restoration guidelines if known terms are supplied.
+     * Pre-cleans leading/inline filler words locally to reduce input token count before calling Gemini.
      */
-    private fun buildSystemPrompt(knownVocabulary: List<String>? = null): String {
-        if (knownVocabulary.isNullOrEmpty()) {
-            return SYSTEM_PROMPT
+    internal fun preCleanRawText(rawText: String): String {
+        var text = rawText.trim()
+        var prev = ""
+        while (text != prev) {
+            prev = text
+            text = fillerPrefixRegex.replaceFirst(text, "").trim()
         }
-        val vocabListStr = knownVocabulary.joinToString(", ")
-        return """$SYSTEM_PROMPT
-
-8. 【使用者專屬詞庫與模糊校正規範】：
-   - 以下為使用者高頻使用的標準專有名詞清單：
-     [$vocabListStr]
-   - 若逐字稿中出現發音或語意高度疑似清單中詞彙的同音錯字、口誤或被誤聽為同音漢字（例如：「底坡」還原為「deploy」、「批啊」還原為「PR」、「插可」還原為「check」、「不讓取」還原為「branch」），請優先還原為清單中的標準專有名詞型態與標準大小寫。
-   - 若上下文語意完全無關，則絕對不要生硬置換。"""
+        return inlineFillerRegex.replace(text, " ").trim()
     }
 
-    private fun buildTextRequestJson(rawText: String, knownVocabulary: List<String>? = null): String {
+    /**
+     * Composes the system prompt, dynamically appending custom vocabulary and fuzzy homophone
+     * restoration guidelines if known terms are supplied (strictly capped at MAX_INJECTED_VOCAB_TERMS).
+     */
+    internal fun buildSystemPrompt(knownVocabulary: List<String>? = null): String {
+        val cappedVocab = knownVocabulary?.filter { it.isNotBlank() }?.take(MAX_INJECTED_VOCAB_TERMS)
+        if (cappedVocab.isNullOrEmpty()) {
+            return SYSTEM_PROMPT
+        }
+        val vocabListStr = cappedVocab.joinToString(", ")
+        return """$SYSTEM_PROMPT
+8. 【專屬詞庫同音校正】：[$vocabListStr]。若出現發音高度相似的同音誤字（如「底坡」➔「deploy」、「批啊」➔「PR」、「蓮發科」➔「聯發科」），請依語境還原為標準詞彙與大小寫。"""
+    }
+
+    internal fun buildTextRequestJson(rawText: String, knownVocabulary: List<String>? = null): String {
         val root = JSONObject()
+        val cleanedInput = preCleanRawText(rawText).ifBlank { rawText.trim() }
 
         // System Instruction
         val promptText = buildSystemPrompt(knownVocabulary)
@@ -290,23 +290,26 @@ class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
         val contentObj = JSONObject()
         val partsArray = JSONArray()
 
-        partsArray.put(JSONObject().put("text", "請依指示潤飾以下語音轉文字逐字稿並直接輸出潤飾文字：\n\n$rawText"))
+        partsArray.put(JSONObject().put("text", "潤飾逐字稿：\n$cleanedInput"))
 
         contentObj.put("parts", partsArray)
         contentsArray.put(contentObj)
         root.put("contents", contentsArray)
 
-        // Generation Config
+        // Generation Config (strictly disable Thinking tokens to prevent $2.50/1M reasoning charges)
         val genConfig = JSONObject().apply {
             put("temperature", 0.1)
-            put("maxOutputTokens", 4096)
+            put("maxOutputTokens", MAX_OUTPUT_TOKENS)
+            put("thinkingConfig", JSONObject().apply {
+                put("thinkingBudget", THINKING_BUDGET)
+            })
         }
         root.put("generationConfig", genConfig)
 
         return root.toString()
     }
 
-    private fun buildAudioRequestJson(audioBase64: String, knownVocabulary: List<String>? = null): String {
+    internal fun buildAudioRequestJson(audioBase64: String, knownVocabulary: List<String>? = null): String {
         val root = JSONObject()
 
         val promptText = buildSystemPrompt(knownVocabulary)
@@ -336,7 +339,10 @@ class GeminiAudioClient(private val apiKeyProvider: () -> String?) {
 
         val genConfig = JSONObject().apply {
             put("temperature", 0.1)
-            put("maxOutputTokens", 2048)
+            put("maxOutputTokens", 1024)
+            put("thinkingConfig", JSONObject().apply {
+                put("thinkingBudget", 0)
+            })
         }
         root.put("generationConfig", genConfig)
 

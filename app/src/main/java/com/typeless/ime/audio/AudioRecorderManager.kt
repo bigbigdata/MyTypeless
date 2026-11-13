@@ -90,7 +90,6 @@ class AudioRecorderManager(private val context: Context) {
 
                     if (System.currentTimeMillis() - recordingStartTime >= MAX_RECORDING_MS) {
                         Log.i(TAG, "Maximum recording duration reached (${MAX_RECORDING_MS / 60000} mins), stopping automatically")
-                        isRecording = false
                         onTimeout?.invoke()
                         break
                     }

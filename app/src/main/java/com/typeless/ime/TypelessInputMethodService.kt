@@ -1,13 +1,21 @@
 package com.typeless.ime
 
 import android.annotation.SuppressLint
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.res.ColorStateList
 import android.inputmethodservice.InputMethodService
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -22,11 +30,16 @@ import android.widget.Button
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.google.android.material.button.MaterialButton
 import com.typeless.ime.ai.GeminiAudioClient
 import com.typeless.ime.ai.GroqWhisperClient
 import com.typeless.ime.audio.AudioRecorderManager
+import com.typeless.ime.engine.HybridPipelineCoordinator
+import com.typeless.ime.engine.LocalAdaptivePolishingEngine
+import com.typeless.ime.engine.NetworkStateMonitor
+import com.typeless.ime.engine.PixelStreamingSttManager
 import com.typeless.ime.vocabulary.VocabularyRepository
 import java.io.File
 import kotlin.concurrent.thread
@@ -47,6 +60,11 @@ class TypelessInputMethodService : InputMethodService() {
 
     companion object {
         private const val TAG = "TypelessIME"
+        const val ON_DEVICE_MAX_RECORDING_MS = 10 * 60 * 1000L // 10-minute safety limit for on-device recognition
+        private const val NOTIFICATION_CHANNEL_ID = "typeless_recording_channel"
+        private const val NOTIFICATION_ID = 1001
+        private const val ACTION_STOP_AND_SUBMIT = "com.typeless.ime.ACTION_STOP_AND_SUBMIT"
+        private const val ACTION_ABORT_RECORDING = "com.typeless.ime.ACTION_ABORT_RECORDING"
     }
 
     private lateinit var audioRecorderManager: AudioRecorderManager
@@ -54,6 +72,10 @@ class TypelessInputMethodService : InputMethodService() {
     private lateinit var groqClient: GroqWhisperClient
     private lateinit var geminiClient: GeminiAudioClient
     private lateinit var vocabularyRepository: VocabularyRepository
+    private lateinit var networkMonitor: NetworkStateMonitor
+    private lateinit var hybridCoordinator: HybridPipelineCoordinator
+    private lateinit var pixelSttManager: PixelStreamingSttManager
+    private lateinit var localPolishingEngine: LocalAdaptivePolishingEngine
 
     private var isRecording = false
     private var isProcessing = false
@@ -65,12 +87,17 @@ class TypelessInputMethodService : InputMethodService() {
     @Volatile
     private var activeProcessingJobId = 0L
 
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var keyboardRootView: View? = null
+    private var lastTranscribedText: String? = null
+
     private var tvStatus: TextView? = null
     private var pbAudioLevel: ProgressBar? = null
     private var btnRecord: MaterialButton? = null
     private var btnSpace: MaterialButton? = null
     private var btnDelete: MaterialButton? = null
     private var btnAction: MaterialButton? = null
+    private var btnModeToggle: Button? = null
     private var lastEditorInfo: EditorInfo? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -89,13 +116,67 @@ class TypelessInputMethodService : InputMethodService() {
         }
     }
 
+    private val onDeviceSafetyTimeoutRunnable = Runnable {
+        if (isRecording) {
+            Toast.makeText(this@TypelessInputMethodService, "已達端側語音辨識上限 (10分鐘)，自動送出", Toast.LENGTH_SHORT).show()
+            stopRecordingFlow()
+        }
+    }
+
+    private val recordingControlReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                ACTION_STOP_AND_SUBMIT -> {
+                    Log.d(TAG, "Notification action: STOP_AND_SUBMIT")
+                    if (isRecording) {
+                        stopRecordingFlow()
+                    }
+                }
+                ACTION_ABORT_RECORDING -> {
+                    Log.d(TAG, "Notification action: ABORT_RECORDING")
+                    if (isRecording) {
+                        abortRecordingFlow(getString(R.string.status_recording_aborted))
+                    } else if (isProcessing) {
+                        abortProcessingFlow()
+                    }
+                }
+            }
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         audioRecorderManager = AudioRecorderManager(this)
         settingsManager = SettingsManager(this)
         vocabularyRepository = VocabularyRepository.getInstance(this)
         groqClient = GroqWhisperClient { settingsManager.groqApiKey }
-        geminiClient = GeminiAudioClient { settingsManager.apiKey }
+        geminiClient = GeminiAudioClient(
+            apiKeyProvider = { settingsManager.apiKey },
+            onUsageRecorded = { tokens -> settingsManager.recordGeminiUsage(tokens) }
+        )
+        networkMonitor = NetworkStateMonitor(this)
+        pixelSttManager = PixelStreamingSttManager(this)
+        localPolishingEngine = LocalAdaptivePolishingEngine(
+            context = this
+        )
+        hybridCoordinator = HybridPipelineCoordinator(
+            context = this,
+            networkMonitor = networkMonitor,
+            settingsManager = settingsManager,
+            vocabularyRepository = vocabularyRepository,
+            groqClient = groqClient,
+            geminiClient = geminiClient
+        )
+
+        val filter = IntentFilter().apply {
+            addAction(ACTION_STOP_AND_SUBMIT)
+            addAction(ACTION_ABORT_RECORDING)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(recordingControlReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(recordingControlReceiver, filter)
+        }
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -105,6 +186,7 @@ class TypelessInputMethodService : InputMethodService() {
             com.google.android.material.R.style.Theme_MaterialComponents_DayNight_NoActionBar
         )
         val view = android.view.LayoutInflater.from(themedContext).inflate(R.layout.keyboard_view, null)
+        keyboardRootView = view
 
         tvStatus = view.findViewById(R.id.tv_status)
         pbAudioLevel = view.findViewById(R.id.pb_audio_level)
@@ -122,6 +204,16 @@ class TypelessInputMethodService : InputMethodService() {
         btnDelete?.iconTint = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.ime_text_primary))
         btnDelete?.iconGravity = MaterialButton.ICON_GRAVITY_TEXT_START
 
+        // Bind mode toggle button (Cloud vs Pixel On-Device)
+        btnModeToggle = view.findViewById(R.id.btn_mode_toggle)
+        updateModeToggleButtonUi()
+        btnModeToggle?.setOnClickListener {
+            settingsManager.isForcedOfflineMode = !settingsManager.isForcedOfflineMode
+            updateModeToggleButtonUi()
+            val modeStr = if (settingsManager.isForcedOfflineMode) "📱 Pixel 端側模式" else "☁️ 雲端優先模式"
+            Toast.makeText(this, "已切換為：$modeStr", Toast.LENGTH_SHORT).show()
+        }
+
         updateStatusPrompt()
 
         // Bind action / enter button click
@@ -129,9 +221,9 @@ class TypelessInputMethodService : InputMethodService() {
             handleActionButton()
         }
 
-        // Bind voice recording touch gestures
-        btnRecord?.setOnTouchListener { _, event ->
-            handleRecordTouch(event)
+        // Bind voice recording toggle click (Pure Tap-to-Toggle mode)
+        btnRecord?.setOnClickListener {
+            handleRecordToggleClick()
         }
 
         // Bind space key (single-tap space, long-press continuous space)
@@ -195,29 +287,131 @@ class TypelessInputMethodService : InputMethodService() {
     override fun onStartInputView(info: android.view.inputmethod.EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
         lastEditorInfo = info
-        updateStatusPrompt()
         updateActionButtonState(info)
+
+        if (isRecording) {
+            syncRecordingUiState()
+        } else if (isProcessing) {
+            syncProcessingUiState()
+        } else {
+            updateStatusPrompt()
+            resetRecordButtonUi()
+        }
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
         super.onFinishInputView(finishingInput)
-        cancelCurrentRecording()
+        deleteHandler.removeCallbacks(deleteRunnable)
+        spaceHandler.removeCallbacks(spaceRunnable)
     }
 
     override fun onWindowHidden() {
         super.onWindowHidden()
-        cancelCurrentRecording()
-    }
-
-    private fun cancelCurrentRecording() {
         deleteHandler.removeCallbacks(deleteRunnable)
         spaceHandler.removeCallbacks(spaceRunnable)
-        if (isRecording) {
-            abortRecordingFlow()
+    }
+
+    private fun acquireWakeLock() {
+        if (wakeLock == null) {
+            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            wakeLock = pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MyTypeless:RecordingWakeLock")?.apply {
+                setReferenceCounted(false)
+            }
         }
-        if (isProcessing) {
-            abortProcessingFlow()
+        wakeLock?.acquire(15 * 60 * 1000L) // Safety max 15 mins
+    }
+
+    private fun releaseWakeLock() {
+        try {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error releasing wakeLock", e)
         }
+    }
+
+    private fun setKeepScreenOn(keepOn: Boolean) {
+        keyboardRootView?.keepScreenOn = keepOn
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                NOTIFICATION_CHANNEL_ID,
+                "語音錄製中",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "MyTypeless 語音輸入背景錄製與控制"
+                setShowBadge(false)
+            }
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            nm?.createNotificationChannel(channel)
+        }
+    }
+
+    private fun showRecordingNotification() {
+        createNotificationChannel()
+
+        val stopIntent = Intent(ACTION_STOP_AND_SUBMIT).apply { setPackage(packageName) }
+        val stopPendingIntent = PendingIntent.getBroadcast(
+            this,
+            1,
+            stopIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val abortIntent = Intent(ACTION_ABORT_RECORDING).apply { setPackage(packageName) }
+        val abortPendingIntent = PendingIntent.getBroadcast(
+            this,
+            2,
+            abortIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_mic)
+            .setContentTitle("MyTypeless 錄音中🎙️")
+            .setContentText("正在持續收音... 點擊下方按鈕可隨時完成或放棄")
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .addAction(0, "⏹️ 停止並送出", stopPendingIntent)
+            .addAction(0, "✕ 放棄", abortPendingIntent)
+            .build()
+
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+        nm?.notify(NOTIFICATION_ID, notification)
+    }
+
+    private fun dismissRecordingNotification() {
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+        nm?.cancel(NOTIFICATION_ID)
+    }
+
+    private fun syncRecordingUiState() {
+        val isDeviceMode = settingsManager.isForcedOfflineMode || !networkMonitor.isOnline
+        tvStatus?.text = if (isDeviceMode) "🎙️ 聆聽中... 說完整句後請點擊送出" else getString(R.string.status_recording)
+        pbAudioLevel?.visibility = View.VISIBLE
+        btnRecord?.isEnabled = true
+        btnRecord?.text = getString(R.string.btn_record_stop)
+        btnRecord?.backgroundTintList = ColorStateList.valueOf(
+            ContextCompat.getColor(this, R.color.ime_recording)
+        )
+        updateDeleteButtonToCancelMode()
+        setKeepScreenOn(true)
+    }
+
+    private fun syncProcessingUiState() {
+        val isDeviceMode = settingsManager.isForcedOfflineMode || !networkMonitor.isOnline
+        tvStatus?.text = if (isDeviceMode) "⏳ Pixel 處理中..." else "⏳ 處理中..."
+        pbAudioLevel?.visibility = View.INVISIBLE
+        btnRecord?.isEnabled = false
+        btnRecord?.text = "⏳ 處理中..."
+        btnRecord?.backgroundTintList = ColorStateList.valueOf(
+            ContextCompat.getColor(this, R.color.ime_card)
+        )
+        updateDeleteButtonToCancelMode()
+        setKeepScreenOn(false)
     }
 
     private fun updateStatusPrompt() {
@@ -354,106 +548,50 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     /**
-     * Handles recording touch gestures:
-     * - Hold to talk: press to speak, release to submit, slide up to cancel.
-     * - Tap to toggle: tap to start, tap again to submit, tap cancel button to abort.
+     * Handles Pure Tap-to-Toggle recording:
+     * - Tap to start recording (runs until user explicitly taps again or safety timeout).
+     * - Tap again to stop and submit.
      */
-    private fun handleRecordTouch(event: MotionEvent): Boolean {
-        when (event.action) {
-            MotionEvent.ACTION_DOWN -> {
-                touchDownTime = System.currentTimeMillis()
-                touchDownY = event.rawY
-                touchDownX = event.rawX
-                isSlidingToCancel = false
-                wasRecordingAtDown = isRecording
+    private fun handleRecordToggleClick() {
+        if (isProcessing) return
 
-                if (!isRecording) {
-                    if (!settingsManager.hasGroqApiKey && !settingsManager.hasApiKey) {
-                        Toast.makeText(this, "請先在設定中輸入 Groq 或 Gemini Key", Toast.LENGTH_SHORT).show()
-                        openSettingsActivity()
-                        return true
-                    }
-
-                    // Pre-warm connection pool asynchronously to eliminate TLS handshake latency
-                    groqClient.prewarmConnection()
-                    geminiClient.prewarmConnection()
-
-                    triggerHapticFeedback(45)
-
-                    PermissionActivity.requestRecordAudio(this) { granted ->
-                        if (granted) {
-                            startRecordingFlow()
-                        } else {
-                            tvStatus?.text = "未授權麥克風，無法進行語音輸入"
-                            Toast.makeText(this, "請允許麥克風權限以使用語音輸入", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                } else {
-                    triggerHapticFeedback(55)
-                }
-                return true
+        if (!isRecording) {
+            val isDeviceMode = settingsManager.isForcedOfflineMode || !networkMonitor.isOnline
+            if (!isDeviceMode && !settingsManager.hasGroqApiKey && !settingsManager.hasApiKey) {
+                Toast.makeText(this, "請先在設定中輸入 Groq 或 Gemini Key", Toast.LENGTH_SHORT).show()
+                openSettingsActivity()
+                return
             }
 
-            MotionEvent.ACTION_MOVE -> {
-                if (isRecording && !wasRecordingAtDown) {
-                    val deltaY = touchDownY - event.rawY
-                    if (deltaY > 100f) {
-                        if (!isSlidingToCancel) {
-                            isSlidingToCancel = true
-                            triggerHapticFeedback(50)
-                            btnRecord?.text = getString(R.string.btn_record_slide_to_cancel)
-                            btnRecord?.backgroundTintList = ColorStateList.valueOf(
-                                ContextCompat.getColor(this, R.color.ime_card)
-                            )
-                            tvStatus?.text = getString(R.string.status_slide_to_cancel)
-                        }
-                    } else if (deltaY < 50f) {
-                        if (isSlidingToCancel) {
-                            isSlidingToCancel = false
-                            triggerHapticFeedback(30)
-                            btnRecord?.text = getString(R.string.btn_record_stop)
-                            btnRecord?.backgroundTintList = ColorStateList.valueOf(
-                                ContextCompat.getColor(this, R.color.ime_recording)
-                            )
-                            tvStatus?.text = getString(R.string.status_recording)
-                        }
-                    }
-                }
-                return true
+            if (!isDeviceMode) {
+                groqClient.prewarmConnection()
+                geminiClient.prewarmConnection()
             }
 
-            MotionEvent.ACTION_UP -> {
-                val pressDuration = System.currentTimeMillis() - touchDownTime
+            triggerHapticFeedback(45)
 
-                if (isSlidingToCancel) {
-                    isSlidingToCancel = false
-                    abortRecordingFlow(getString(R.string.status_recording_aborted))
-                    return true
-                }
-
-                if (wasRecordingAtDown) {
-                    stopRecordingFlow()
-                } else {
-                    if (pressDuration >= 400L) {
-                        stopRecordingFlow()
+            PermissionActivity.requestRecordAudio(this) { granted ->
+                if (granted) {
+                    if (isDeviceMode) {
+                        startOnDeviceRecordingFlow()
                     } else {
-                        tvStatus?.text = getString(R.string.status_recording_tap)
+                        startRecordingFlow()
                     }
+                } else {
+                    tvStatus?.text = "未授權麥克風，無法進行語音輸入"
+                    Toast.makeText(this, "請允許麥克風權限以使用語音輸入", Toast.LENGTH_SHORT).show()
                 }
-                return true
             }
-
-            MotionEvent.ACTION_CANCEL -> {
-                if (isSlidingToCancel || (!wasRecordingAtDown && isRecording)) {
-                    abortRecordingFlow(getString(R.string.status_recording_aborted))
-                }
-                return true
-            }
+        } else {
+            // Already recording -> User clicked stop to finalize speech!
+            triggerHapticFeedback(65)
+            stopRecordingFlow()
         }
-        return false
     }
 
     private fun startRecordingFlow() {
+        mainHandler.removeCallbacks(onDeviceSafetyTimeoutRunnable)
+
         val success = audioRecorderManager.startRecording(
             onAmplitude = { amplitude ->
                 pbAudioLevel?.post {
@@ -464,7 +602,7 @@ class TypelessInputMethodService : InputMethodService() {
             onTimeout = {
                 mainHandler.post {
                     if (isRecording) {
-                        Toast.makeText(this@TypelessInputMethodService, "已達最大錄音保護上限，自動送出", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this@TypelessInputMethodService, "已達最大錄音保護上限 (15分鐘)，自動送出", Toast.LENGTH_SHORT).show()
                         stopRecordingFlow()
                     }
                 }
@@ -472,6 +610,10 @@ class TypelessInputMethodService : InputMethodService() {
         )
 
         if (success) {
+            acquireWakeLock()
+            setKeepScreenOn(true)
+            showRecordingNotification()
+
             isRecording = true
             isSlidingToCancel = false
             tvStatus?.text = getString(R.string.status_recording)
@@ -487,9 +629,19 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     private fun stopRecordingFlow() {
+        mainHandler.removeCallbacks(onDeviceSafetyTimeoutRunnable)
+        releaseWakeLock()
+        setKeepScreenOn(false)
+        dismissRecordingNotification()
+
+        val isDeviceMode = settingsManager.isForcedOfflineMode || !networkMonitor.isOnline
+        if (isDeviceMode) {
+            stopOnDeviceRecordingFlow()
+            return
+        }
+
         val audioFile: File? = audioRecorderManager.stopRecording()
         isRecording = false
-        isSlidingToCancel = false
         triggerHapticFeedback(65)
 
         pbAudioLevel?.visibility = View.INVISIBLE
@@ -516,13 +668,132 @@ class TypelessInputMethodService : InputMethodService() {
         }
     }
 
+    private fun startOnDeviceRecordingFlow() {
+        mainHandler.removeCallbacks(onDeviceSafetyTimeoutRunnable)
+        mainHandler.postDelayed(onDeviceSafetyTimeoutRunnable, ON_DEVICE_MAX_RECORDING_MS)
+
+        val jobId = ++activeProcessingJobId
+        val started = pixelSttManager.startListening(
+            onRmsChanged = { rmsdB ->
+                pbAudioLevel?.post {
+                    val progress = ((rmsdB + 2f) * 10f).toInt().coerceIn(0, 100)
+                    pbAudioLevel?.progress = progress
+                }
+            },
+            onPartialResult = { partial ->
+                tvStatus?.post {
+                    tvStatus?.text = "🗣️ 正在辨識: $partial"
+                }
+            },
+            onFinalResult = { rawText, asrDurationMs ->
+                mainHandler.post {
+                    processOnDeviceStage2(rawText, asrDurationMs, jobId)
+                }
+            },
+            onError = { errorMsg ->
+                mainHandler.post {
+                    abortProcessingFlow("❌ $errorMsg")
+                }
+            }
+        )
+
+        if (started) {
+            acquireWakeLock()
+            setKeepScreenOn(true)
+            showRecordingNotification()
+
+            isRecording = true
+            isSlidingToCancel = false
+            tvStatus?.text = "🎙️ 聆聽中... 說完整句後請點擊送出"
+            pbAudioLevel?.visibility = View.VISIBLE
+            btnRecord?.text = getString(R.string.btn_record_stop)
+            btnRecord?.backgroundTintList = ColorStateList.valueOf(
+                ContextCompat.getColor(this, R.color.ime_recording)
+            )
+            updateDeleteButtonToCancelMode()
+        } else {
+            tvStatus?.text = "原生離線語音啟動失敗"
+            resetRecordButtonUi()
+        }
+    }
+
+    private fun stopOnDeviceRecordingFlow() {
+        mainHandler.removeCallbacks(onDeviceSafetyTimeoutRunnable)
+        releaseWakeLock()
+        setKeepScreenOn(false)
+        dismissRecordingNotification()
+
+        isRecording = false
+        triggerHapticFeedback(65)
+        pbAudioLevel?.visibility = View.INVISIBLE
+        pbAudioLevel?.progress = 0
+
+        isProcessing = true
+        btnRecord?.isEnabled = false
+        btnRecord?.text = "⏳ Pixel 處理中..."
+        btnRecord?.backgroundTintList = ColorStateList.valueOf(
+            ContextCompat.getColor(this, R.color.ime_card)
+        )
+        updateDeleteButtonToCancelMode()
+
+        pixelSttManager.stopListeningByUser()
+    }
+
+    private fun processOnDeviceStage2(rawText: String, asrDurationMs: Long, jobId: Long) {
+        if (jobId != activeProcessingJobId) return
+
+        isProcessing = true
+        tvStatus?.text = "📱 Pixel 端側潤飾中..."
+
+        thread(start = true, name = "OnDevicePolishingThread") {
+            val polishStartTime = System.currentTimeMillis()
+            val terms = vocabularyRepository.getAllTermsForGemini(limit = 30)
+            val polishResult = localPolishingEngine.polish(rawText, terms)
+            val polishDurationMs = System.currentTimeMillis() - polishStartTime
+            val totalMs = asrDurationMs + polishDurationMs
+
+            val finalText = polishResult.getOrDefault(rawText)
+
+            if (jobId != activeProcessingJobId) return@thread
+
+            // Asynchronously record usage and auto-harvest terms in existing SQLite dictionary
+            vocabularyRepository.recordUsageAsync(finalText)
+
+            mainHandler.post {
+                injectText(finalText)
+                val badge = "📱 純端側完成 (0 雲端 tok)｜ASR: ${asrDurationMs}ms ➔ 潤飾: ${polishDurationMs}ms"
+                tvStatus?.text = badge
+                Toast.makeText(this@TypelessInputMethodService, badge, Toast.LENGTH_SHORT).show()
+                triggerHapticFeedback(40)
+                resetRecordButtonUi()
+                isProcessing = false
+            }
+        }
+    }
+
+    private fun updateModeToggleButtonUi() {
+        if (settingsManager.isForcedOfflineMode) {
+            btnModeToggle?.text = "📱 端側"
+            btnModeToggle?.setTextColor(ContextCompat.getColor(this, R.color.ime_recording))
+        } else {
+            btnModeToggle?.text = "☁️ 雲端"
+            btnModeToggle?.setTextColor(ContextCompat.getColor(this, R.color.ime_text_secondary))
+        }
+    }
+
     /**
      * Aborts and discards the active audio recording without transcription.
      */
     private fun abortRecordingFlow(statusMessage: String = "已中斷並放棄本次錄音") {
+        mainHandler.removeCallbacks(onDeviceSafetyTimeoutRunnable)
+        releaseWakeLock()
+        setKeepScreenOn(false)
+        dismissRecordingNotification()
+
         isRecording = false
         isSlidingToCancel = false
         audioRecorderManager.cancelRecording()
+        pixelSttManager.cancel()
         triggerHapticFeedback(80)
 
         mainHandler.post {
@@ -538,6 +809,10 @@ class TypelessInputMethodService : InputMethodService() {
      * Aborts the in-flight AI processing job and prevents text injection.
      */
     private fun abortProcessingFlow(statusMessage: String = "已中斷輸入") {
+        releaseWakeLock()
+        setKeepScreenOn(false)
+        dismissRecordingNotification()
+
         activeProcessingJobId++
         isProcessing = false
         triggerHapticFeedback(80)
@@ -566,91 +841,25 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     /**
-     * Two-stage pipeline processing logic:
-     * Stage 1: Audio STT (Groq Whisper / Gemini Audio direct fallback)
-     * Stage 2: Text Polishing (Gemini LLM / Local Fast-Path filter)
+     * Two-stage pipeline processing delegated to HybridPipelineCoordinator
+     * (Coordinates cloud Whisper/Gemini with on-device fallback and circuit breakers).
      */
     private fun processAudioPipeline(audioFile: File, jobId: Long) {
-        var rawText: String? = null
-
-        // Query vocabulary bias
-        val dynamicWhisperPrompt = vocabularyRepository.buildWhisperPrompt()
-        val knownVocabulary = vocabularyRepository.getAllTermsForGemini()
-
-        // Stage 1: Speech-to-Text (STT) via Groq Whisper with dynamic vocabulary bias
-        if (settingsManager.hasGroqApiKey) {
-            updateStatusOnMain("⚡ Groq 轉錄中...")
-            val groqResult = groqClient.transcribe(audioFile, dynamicWhisperPrompt)
-            groqResult.onSuccess { text ->
-                if (text.isNotBlank()) {
-                    rawText = text
-                }
-            }.onFailure { err ->
-                if (BuildConfig.DEBUG) {
-                    Log.w(TAG, "Groq transcription failed: ${err.message}")
-                }
-            }
-        }
-
-        // Fallback: If no Groq Key is available or Groq STT fails, try direct Gemini multimodal transcription if Gemini Key is configured
-        if (rawText.isNullOrBlank() && settingsManager.hasApiKey) {
-            updateStatusOnMain("🤖 Gemini 直傳辨識中...")
-            val directResult = geminiClient.transcribeAndPolish(audioFile, settingsManager.model, knownVocabulary)
-            directResult.onSuccess { polished ->
-                safeDelete(audioFile)
-                onProcessingSuccess("🤖 Gemini 直傳完成", polished, jobId)
-                return
-            }.onFailure { err ->
-                if (BuildConfig.DEBUG) {
-                    Log.w(TAG, "Gemini direct audio transcription failed: ${err.message}")
-                }
-            }
-        }
+        val result = hybridCoordinator.process(
+            audioFile = audioFile,
+            jobId = jobId,
+            activeJobCheck = { jobId == activeProcessingJobId },
+            onStatusUpdate = { status -> updateStatusOnMain(status) }
+        )
 
         safeDelete(audioFile)
 
         if (jobId != activeProcessingJobId) return
 
-        if (rawText.isNullOrBlank()) {
-            onProcessingFailure("未偵測到清晰語音或轉錄失敗", jobId)
-            return
-        }
-
-        Log.i(TAG, "===> [Stage 1 STT Raw]: (${rawText?.length ?: 0} chars)")
-
-        // Latency optimization: Fast-Path Skip for ultra-short affirmations.
-        // For common 1-4 character affirmations (e.g., "OK", "Sure", "Thanks", "No problem"),
-        // inject text directly locally to save 500ms+ cloud Gemini round-trip latency.
-        if (isFastPathCandidate(rawText!!)) {
-            val localCleaned = cleanFillerWordsLocally(rawText!!)
-            val formatted = applyPanguSpacing(localCleaned)
-            Log.i(TAG, "===> [Fast-Path Direct]: (${formatted.length} chars)")
-            onProcessingSuccess("⚡ 極速直出 (Fast-Path)", formatted, jobId)
-            return
-        }
-
-        // Stage 2: Gemini text polishing and structuring with known vocabulary bias
-        if (settingsManager.hasApiKey) {
-            updateStatusOnMain("🤖 Gemini 潤飾中...")
-            val polishResult = geminiClient.polishText(rawText!!, settingsManager.model, knownVocabulary)
-            if (jobId != activeProcessingJobId) return
-            polishResult.onSuccess { polished ->
-                val textToInject = if (polished.isNotBlank()) polished else rawText!!
-                Log.i(TAG, "===> [Stage 2 Gemini Polished]: (${textToInject.length} chars)")
-                onProcessingSuccess("⚡ Groq + 🤖 Gemini 潤飾完成", textToInject, jobId)
-            }.onFailure { err ->
-                if (BuildConfig.DEBUG) {
-                    Log.w(TAG, "Gemini polishing failed or rate limited (429), falling back to local output: ${err.message}")
-                }
-                val localCleaned = cleanFillerWordsLocally(rawText!!)
-                Log.i(TAG, "===> [Stage 2 Local Fallback]: (${localCleaned.length} chars)")
-                onProcessingSuccess("⚡ Groq 直出（AI 冷卻中）", localCleaned, jobId)
-            }
-        } else {
-            // If no Gemini API key is configured, perform local filtering and output directly
-            val localCleaned = cleanFillerWordsLocally(rawText!!)
-            Log.i(TAG, "===> [Stage 2 Direct]: (${localCleaned.length} chars)")
-            onProcessingSuccess("⚡ Groq 直出", localCleaned, jobId)
+        result.onSuccess { output ->
+            onProcessingSuccess(output.statusBadge, output.text, jobId)
+        }.onFailure { err ->
+            onProcessingFailure(err.message ?: "轉錄或整理失敗", jobId)
         }
     }
 
@@ -728,6 +937,7 @@ class TypelessInputMethodService : InputMethodService() {
             ContextCompat.getColor(this, R.color.ime_primary)
         )
         resetDeleteButtonUi()
+        setKeepScreenOn(false)
     }
 
     private fun safeDelete(file: File) {
@@ -755,18 +965,31 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     private fun injectText(text: String) {
+        val traditionalText = com.typeless.ime.engine.TraditionalChineseConverter.toTraditional(text)
+        lastTranscribedText = traditionalText
         val ic = currentInputConnection
         if (ic != null) {
-            ic.commitText(text, 1)
+            ic.commitText(traditionalText, 1)
         } else {
-            Toast.makeText(this, "無法取得焦點輸入框", Toast.LENGTH_SHORT).show()
+            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            val clip = ClipData.newPlainText("MyTypeless Transcribed Text", traditionalText)
+            clipboard?.setPrimaryClip(clip)
+            Toast.makeText(this, "語音辨識完成！已自動複製至剪貼簿：\n$traditionalText", Toast.LENGTH_LONG).show()
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        mainHandler.removeCallbacks(onDeviceSafetyTimeoutRunnable)
+        networkMonitor.unregister()
+        pixelSttManager.cancel()
         deleteHandler.removeCallbacks(deleteRunnable)
         spaceHandler.removeCallbacks(spaceRunnable)
+        releaseWakeLock()
+        dismissRecordingNotification()
+        try {
+            unregisterReceiver(recordingControlReceiver)
+        } catch (_: Exception) {}
         if (isRecording) {
             audioRecorderManager.cancelRecording()
         }
