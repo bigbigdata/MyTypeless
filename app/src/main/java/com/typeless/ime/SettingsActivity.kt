@@ -75,34 +75,65 @@ class SettingsActivity : AppCompatActivity() {
             settingsManager.apiKey = geminiKey.ifEmpty { null }
 
             if (geminiKey.isNotEmpty()) {
-                val appCtx = applicationContext
+                btnSave.isEnabled = false
+                btnSave.text = "⏳ 正在實測 Gemini 連線..."
                 val client = GeminiAudioClient(apiKeyProvider = { geminiKey })
                 thread(start = true, name = "GeminiVerifyKeyThread") {
                     val verifyResult = client.verifyApiKeyAndModel(settingsManager.model)
                     Handler(Looper.getMainLooper()).post {
+                        btnSave.isEnabled = true
+                        btnSave.text = "儲存設定"
                         verifyResult.onSuccess { msg ->
-                            Toast.makeText(appCtx, "✅ Gemini API 連線驗證成功 ($msg)", Toast.LENGTH_LONG).show()
+                            tvVocabStats.text = "${baseStatsText()}\n✅ Gemini API 連線驗證成功 ($msg)"
+                            Toast.makeText(this@SettingsActivity, "✅ Gemini API 連線驗證成功 ($msg)", Toast.LENGTH_LONG).show()
+                            Handler(Looper.getMainLooper()).postDelayed({
+                                if (!isFinishing) finish()
+                            }, 1500L)
                         }.onFailure { err ->
-                            Toast.makeText(appCtx, "⚠️ Gemini API 驗證異常: ${err.message}", Toast.LENGTH_LONG).show()
+                            tvVocabStats.text = "${baseStatsText()}\n⚠️ Gemini API 驗證異常: ${err.message}"
+                            Toast.makeText(this@SettingsActivity, "⚠️ Gemini API 驗證異常: ${err.message}", Toast.LENGTH_LONG).show()
                         }
                     }
                 }
+            } else {
+                Toast.makeText(this, "設定已儲存！", Toast.LENGTH_SHORT).show()
+                finish()
             }
-
-            Toast.makeText(this, "設定已儲存！正在背景驗證連線...", Toast.LENGTH_SHORT).show()
-            finish()
         }
     }
 
     override fun onResume() {
         super.onResume()
         updateVocabStats()
+        runAutoConnectionCheck()
     }
 
-    private fun updateVocabStats() {
+    private fun baseStatsText(): String {
         val count = vocabularyRepository.getCount()
         val callsToday = settingsManager.dailyGeminiCalls
         val tokensToday = settingsManager.dailyGeminiTokens
-        tvVocabStats.text = "目前已收錄 $count 個專有名詞｜今日雲端 Gemini：$callsToday 次 ($tokensToday tok)"
+        return "目前已收錄 $count 個專有名詞｜今日雲端 Gemini：$callsToday 次 ($tokensToday tok)"
+    }
+
+    private fun updateVocabStats() {
+        tvVocabStats.text = baseStatsText()
+    }
+
+    private fun runAutoConnectionCheck() {
+        val key = settingsManager.apiKey ?: return
+        tvVocabStats.text = "${baseStatsText()}\n⏳ 正在實測 Gemini (${settingsManager.model}) 連線..."
+        val client = GeminiAudioClient(apiKeyProvider = { key })
+        thread(start = true, name = "GeminiAutoVerifyThread") {
+            val result = client.verifyApiKeyAndModel(settingsManager.model)
+            Handler(Looper.getMainLooper()).post {
+                if (isFinishing || isDestroyed) return@post
+                result.onSuccess { msg ->
+                    tvVocabStats.text = "${baseStatsText()}\n✅ Gemini API 連線驗證成功 ($msg)"
+                    Toast.makeText(this@SettingsActivity, "✅ Gemini API 連線驗證成功 (HTTP 200 OK)", Toast.LENGTH_LONG).show()
+                }.onFailure { err ->
+                    tvVocabStats.text = "${baseStatsText()}\n⚠️ Gemini API 驗證失敗: ${err.message}"
+                }
+            }
+        }
     }
 }

@@ -99,9 +99,10 @@ class LocalSemanticFormatterTest {
     }
 
     @Test
-    fun testDefaultModelIsGemini25FlashWithZeroThinking() {
-        assertEquals("gemini-2.5-flash", SettingsManager.DEFAULT_MODEL)
-        assertEquals("gemini-2.5-flash", GeminiAudioClient.DEFAULT_MODEL)
+    fun testDefaultModelIsGemini3FlashWithZeroThinking() {
+        assertEquals("gemini-3-flash-preview", SettingsManager.DEFAULT_MODEL)
+        assertEquals("gemini-3-flash-preview", GeminiAudioClient.DEFAULT_MODEL)
+        assertEquals("gemini-3.1-flash-lite", GeminiAudioClient.FALLBACK_LITE_MODEL)
         assertEquals(0, GeminiAudioClient.THINKING_BUDGET)
     }
 

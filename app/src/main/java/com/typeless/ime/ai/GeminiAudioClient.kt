@@ -31,8 +31,8 @@ class GeminiAudioClient(
 
     companion object {
         private const val TAG = "GeminiAudioClient"
-        const val DEFAULT_MODEL = "gemini-2.5-flash"
-        const val FALLBACK_LITE_MODEL = "gemini-2.5-flash-lite"
+        const val DEFAULT_MODEL = "gemini-3-flash-preview"
+        const val FALLBACK_LITE_MODEL = "gemini-3.1-flash-lite"
         internal const val MAX_INJECTED_VOCAB_TERMS = 30
         internal const val THINKING_BUDGET = 0
         internal const val MAX_OUTPUT_TOKENS = 1024
@@ -202,8 +202,15 @@ class GeminiAudioClient(
             }
             Thread.sleep(1000)
             executeApiCall(model, apiKey, jsonPayload)
+        } catch (e: ModelNotFoundException) {
+            if (model != FALLBACK_LITE_MODEL) {
+                Log.w(TAG, "Model $model returned 404; automatically falling back to $FALLBACK_LITE_MODEL")
+                executeApiCall(FALLBACK_LITE_MODEL, apiKey, jsonPayload)
+            } else {
+                throw e
+            }
         } catch (e: RateLimitException) {
-            // If gemini-2.5-flash hits its Free Tier RPM/RPD limit, seamlessly try gemini-2.5-flash-lite's separate quota pool
+            // If primary model hits its Free Tier RPM/RPD limit, seamlessly try fallback model's separate quota pool
             if (model != FALLBACK_LITE_MODEL) {
                 Log.i(TAG, "Primary model $model hit 429 rate limit; attempting seamless fallback to $FALLBACK_LITE_MODEL")
                 executeApiCall(FALLBACK_LITE_MODEL, apiKey, jsonPayload)
@@ -235,7 +242,9 @@ class GeminiAudioClient(
                     responseBody
                 }
 
-                if (response.code == 429) {
+                if (response.code == 404) {
+                    throw ModelNotFoundException("HTTP 404: $errorSummary")
+                } else if (response.code == 429) {
                     throw RateLimitException("HTTP 429: $errorSummary")
                 } else if (response.code == 503) {
                     throw ServerUnavailableException("HTTP 503: $errorSummary")
@@ -395,4 +404,5 @@ class GeminiAudioClient(
 
     class RateLimitException(message: String) : IOException(message)
     class ServerUnavailableException(message: String) : IOException(message)
+    class ModelNotFoundException(message: String) : IOException(message)
 }
