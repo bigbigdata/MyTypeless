@@ -36,6 +36,20 @@ class VocabularyDatabaseHelper(context: Context) :
          * Curated seed terms covering common daily, engineering, and PM code-switching expressions.
          */
         val DEFAULT_SEEDS = listOf(
+            Pair("台積電", "Business"),
+            Pair("聯發科", "Business"),
+            Pair("輝達", "Business"),
+            Pair("鴻海", "Business"),
+            Pair("晶圓代工", "Tech"),
+            Pair("矽智財", "Tech"),
+            Pair("封測", "Tech"),
+            Pair("伺服器", "Tech"),
+            Pair("資安", "Tech"),
+            Pair("資料庫", "Tech"),
+            Pair("部署", "Tech"),
+            Pair("專案", "General"),
+            Pair("排程", "General"),
+            Pair("架構", "Tech"),
             Pair("PR", "Tech"),
             Pair("deploy", "Tech"),
             Pair("meeting", "General"),
@@ -70,7 +84,6 @@ class VocabularyDatabaseHelper(context: Context) :
             Pair("staging", "Tech"),
             Pair("refactor", "Tech"),
             Pair("benchmark", "Tech"),
-            Pair("台積電", "Business"),
             Pair("FinTech", "Business")
         )
     }
@@ -110,7 +123,9 @@ class VocabularyDatabaseHelper(context: Context) :
      */
     fun purgeAutoHarvestedTerms(): Int {
         val db = writableDatabase
-        return db.delete(TABLE_NAME, "$COLUMN_TAG = ? AND $COLUMN_IS_DEFAULT = 0", arrayOf("Auto"))
+        val deleted = db.delete(TABLE_NAME, "$COLUMN_TAG = ? AND $COLUMN_IS_DEFAULT = 0", arrayOf("Auto"))
+        seedDefaults(db)
+        return deleted
     }
 
     private fun seedDefaults(db: SQLiteDatabase) {

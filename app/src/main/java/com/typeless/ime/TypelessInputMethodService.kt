@@ -563,11 +563,6 @@ class TypelessInputMethodService : InputMethodService() {
                 return
             }
 
-            if (!isDeviceMode) {
-                groqClient.prewarmConnection()
-                geminiClient.prewarmConnection()
-            }
-
             triggerHapticFeedback(45)
 
             PermissionActivity.requestRecordAudio(this) { granted ->

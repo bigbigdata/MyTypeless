@@ -1,7 +1,7 @@
 package com.typeless.ime.ai
 
 import android.util.Log
-import com.typeless.ime.BuildConfig
+import com.typeless.ime.engine.WhisperHallucinationFilter
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
@@ -11,7 +11,6 @@ import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
-import kotlin.concurrent.thread
 
 /**
  * GroqWhisperClient
@@ -25,7 +24,8 @@ class GroqWhisperClient(private val apiKeyProvider: () -> String?) {
         private const val TAG = "GroqWhisperClient"
         private const val GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
         private const val MODEL_NAME = "whisper-large-v3-turbo"
-        private const val WHISPER_PROMPT = "這是一段日常生活與工作的繁體中文語音，自然夾雜常見的英文單字與專有名詞，例如：PR, deploy, meeting, sync, check, chill, brunch, bug, commit, branch, merge, feature, API, SDK, PM, UI, UX, issue, release, test, Wi-Fi, Google, GitHub, Notion, Slack。"
+        const val DEFAULT_LANGUAGE = "zh"
+        private const val WHISPER_PROMPT = "以下是台灣繁體中文的日常與工作語音逐字稿，請使用繁體中文標點符號，並自然保留句中夾雜的英文專有名詞如 PR, deploy, meeting, sync, API, bug, branch。"
     }
 
     private val client = OkHttpClient.Builder()
@@ -33,29 +33,6 @@ class GroqWhisperClient(private val apiKeyProvider: () -> String?) {
         .writeTimeout(60, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .build()
-
-    /**
-     * Asynchronously pre-warms the connection pool when the user starts speaking.
-     * Establishes a TLS session in advance to eliminate 150-250ms of handshake latency upon release.
-     */
-    fun prewarmConnection() {
-        val apiKey = apiKeyProvider() ?: return
-        thread(start = true, name = "GroqPrewarmThread") {
-            try {
-                val req = Request.Builder()
-                    .url(GROQ_URL)
-                    .header("Authorization", "Bearer $apiKey")
-                    .head()
-                    .build()
-                client.newCall(req).execute().close()
-                if (BuildConfig.DEBUG) {
-                    Log.d(TAG, "Groq connection pool pre-warmed successfully")
-                }
-            } catch (_: Exception) {
-                // Pre-warming failure is non-fatal; regular calls will establish connection as normal
-            }
-        }
-    }
 
     /**
      * Transcribes an audio file into raw text (supports M4A/AAC and WAV).
@@ -90,6 +67,7 @@ class GroqWhisperClient(private val apiKeyProvider: () -> String?) {
                 .addFormDataPart("model", MODEL_NAME)
                 .addFormDataPart("response_format", "json")
                 .addFormDataPart("temperature", "0.0")
+                .addFormDataPart("language", DEFAULT_LANGUAGE)
                 .addFormDataPart("prompt", promptToUse)
                 .build()
 
@@ -113,7 +91,8 @@ class GroqWhisperClient(private val apiKeyProvider: () -> String?) {
                 }
 
                 val json = JSONObject(body)
-                val text = json.optString("text", "").trim()
+                val rawText = json.optString("text", "").trim()
+                val text = WhisperHallucinationFilter.stripTrailingHallucinations(rawText)
                 Log.i(TAG, "Groq STT transcribed successfully (${text.length} chars)")
                 Result.success(text)
             }

@@ -26,8 +26,9 @@ class VocabularyRepository private constructor(context: Context) {
 
     companion object {
         private const val TAG = "VocabularyRepository"
-        private const val DEFAULT_WHISPER_PREFIX = "繁體中文日常與工作語音，常見詞："
-        private const val MAX_WHISPER_PROMPT_CHARS = 140
+        private const val DEFAULT_WHISPER_PREFIX = "以下是台灣繁體中文的日常與工作語音逐字稿，請使用繁體中文標點符號，常見詞彙包含："
+        private const val MAX_WHISPER_PROMPT_CHARS = 150
+        private const val MAX_ENGLISH_TERMS_IN_WHISPER_PROMPT = 10
 
         /**
          * Common English function words and stop words to exclude from auto-harvesting.
@@ -95,16 +96,21 @@ class VocabularyRepository private constructor(context: Context) {
         prefix: String = DEFAULT_WHISPER_PREFIX,
         maxChars: Int = MAX_WHISPER_PROMPT_CHARS
     ): String {
-        val topTerms = dbHelper.getTopTerms(limit = 40)
+        val topTerms = dbHelper.getTopTerms(limit = 50)
         if (topTerms.isEmpty()) {
             return prefix
         }
 
+        // Prioritize Traditional Chinese terms first, and cap pure English terms so Whisper's Mandarin acoustic model stays anchored
+        val zhTerms = topTerms.filter { term -> term.any { it.code > 127 } }
+        val enTerms = topTerms.filter { term -> term.all { it.code <= 127 } }.take(MAX_ENGLISH_TERMS_IN_WHISPER_PROMPT)
+        val balancedTerms = zhTerms + enTerms
+
         val sb = StringBuilder(prefix)
         var addedCount = 0
 
-        for (term in topTerms) {
-            val candidate = if (addedCount == 0) term else ", $term"
+        for (term in balancedTerms) {
+            val candidate = if (addedCount == 0) term else "、$term"
             if (sb.length + candidate.length + 1 > maxChars) {
                 break
             }

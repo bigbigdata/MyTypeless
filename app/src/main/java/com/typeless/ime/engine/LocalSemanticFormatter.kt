@@ -49,7 +49,8 @@ object LocalSemanticFormatter {
     )
 
     fun format(rawText: String, knownVocabulary: List<String> = emptyList()): String {
-        var text = TraditionalChineseConverter.toTraditional(rawText.trim())
+        val strippedRaw = WhisperHallucinationFilter.stripTrailingHallucinations(rawText)
+        var text = TraditionalChineseConverter.toTraditional(strippedRaw.trim())
         if (text.isBlank()) return ""
 
         // 1. Remove chained leading fillers ("那個 呃 就是說 ...")

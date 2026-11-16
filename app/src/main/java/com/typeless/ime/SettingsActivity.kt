@@ -3,12 +3,16 @@ package com.typeless.ime
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.google.android.material.textfield.TextInputEditText
+import com.typeless.ime.ai.GeminiAudioClient
 import com.typeless.ime.vocabulary.VocabularyRepository
+import kotlin.concurrent.thread
 
 /**
  * SettingsActivity
@@ -70,7 +74,22 @@ class SettingsActivity : AppCompatActivity() {
             settingsManager.groqApiKey = groqKey.ifEmpty { null }
             settingsManager.apiKey = geminiKey.ifEmpty { null }
 
-            Toast.makeText(this, "設定已儲存！", Toast.LENGTH_SHORT).show()
+            if (geminiKey.isNotEmpty()) {
+                val appCtx = applicationContext
+                val client = GeminiAudioClient(apiKeyProvider = { geminiKey })
+                thread(start = true, name = "GeminiVerifyKeyThread") {
+                    val verifyResult = client.verifyApiKeyAndModel(settingsManager.model)
+                    Handler(Looper.getMainLooper()).post {
+                        verifyResult.onSuccess { msg ->
+                            Toast.makeText(appCtx, "✅ Gemini API 連線驗證成功 ($msg)", Toast.LENGTH_LONG).show()
+                        }.onFailure { err ->
+                            Toast.makeText(appCtx, "⚠️ Gemini API 驗證異常: ${err.message}", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+            }
+
+            Toast.makeText(this, "設定已儲存！正在背景驗證連線...", Toast.LENGTH_SHORT).show()
             finish()
         }
     }

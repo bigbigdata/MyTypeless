@@ -28,4 +28,19 @@ class TraditionalChineseConverterTest {
         val actual = TraditionalChineseConverter.toTraditional(input)
         assertEquals(expected, actual)
     }
+
+    @Test
+    fun testDoesNotCorruptValidTraditionalChineseWords() {
+        // Must NEVER corrupt valid Traditional Chinese words like 干擾->幹擾, 上游->上遊, 台積電->臺積電, 阿里山->阿裡山
+        val validTraditional = "請不要干擾或干預這項不相干的台積電上游與下游產能測試，我們在後台觀察十分鐘後再去游泳。"
+        assertEquals(validTraditional, TraditionalChineseConverter.toTraditional(validTraditional))
+    }
+
+    @Test
+    fun testCorrectOneToManySimplifiedToTraditionalPhrases() {
+        // Must convert 十分钟->十分鐘 (not 十分鍾), 复杂->複雜 (not 復雜), 复制->複製 (not 復製), 关系->關係 (not 關系), 联系->聯繫
+        val simplified = "今天我们花了十分钟复制这份复杂的系统架构图，没关系，稍后再联系里面跟后面的同事确认。"
+        val expected = "今天我們花了十分鐘複製這份複雜的系統架構圖，沒關係，稍後再聯繫裡面跟後面的同事確認。"
+        assertEquals(expected, TraditionalChineseConverter.toTraditional(simplified))
+    }
 }

@@ -44,17 +44,10 @@ class HybridPipelineCoordinator(
         private const val TAG = "HybridCoordinator"
         private const val CLOUD_STT_TIMEOUT_MS = 45_000L  // 45s for audio upload & Groq Whisper transcription of long audio
         private const val CLOUD_POLISH_TIMEOUT_MS = 15_000L // 15s for Gemini text polishing
-        const val FAST_PATH_MAX_CHARS = 25
+        const val FAST_PATH_MAX_CHARS = 4
 
         private val fastAffirmationRegex = Regex(
-            "^(好|好的|好啊|可以|沒問題|没问题|收到|謝謝|谢谢|對|对|OK|ok|yes|Yes|好沒問題|好的謝謝|收到謝謝)[，,。！？!~]*$"
-        )
-        private val leadingFillerStripRegex = Regex(
-            "^[，,。？?\\s]*(呃|啊|那個|就是說|然後其實|嗯)+[，,。？?\\s]*"
-        )
-        private val structuralKeywordsRegex = Regex(
-            "(第一|第二|第三|首先|其次|最後|另外|除此之外|總之|重點|注意事項|first|second|third|additionally|furthermore|takeaways|action items)",
-            RegexOption.IGNORE_CASE
+            "^(好|好的|好啊|可以|沒問題|没问题|收到|謝謝|谢谢|謝謝你|谢谢你|謝謝大家|谢谢大家|對|对|OK|ok|yes|Yes|好沒問題|好的謝謝|收到謝謝)[，,。！？!~]*$"
         )
 
         /**
@@ -69,29 +62,15 @@ class HybridPipelineCoordinator(
         }
 
         /**
-         * Option B Routing:
-         * Short & medium everyday utterances (<= 25 spoken units after stripping leading fillers) without
-         * multi-paragraph or numbered/bullet list markers bypass Cloud Gemini and use LocalSemanticFormatter
-         * directly (0 Gemini tokens, <2ms latency).
+         * Fast-Path Routing:
+         * Only trivial short affirmations (<= 4 chars matching fastAffirmationRegex) bypass Cloud Gemini.
+         * All real sentences (> 4 chars) route to Gemini 2.5 Flash (thinkingBudget=0) for high-accuracy
+         * Traditional Chinese contextual homophone correction.
          */
         fun shouldUseLocalFastPath(text: String): Boolean {
             val trimmed = text.trim()
             if (trimmed.isEmpty()) return true
-            if (fastAffirmationRegex.matches(trimmed)) return true
-
-            var cleaned = trimmed
-            var prev = ""
-            while (cleaned != prev) {
-                prev = cleaned
-                cleaned = leadingFillerStripRegex.replaceFirst(cleaned, "").trim()
-            }
-            val units = countSpokenUnits(cleaned)
-            if (units in 1..FAST_PATH_MAX_CHARS) {
-                if (!structuralKeywordsRegex.containsMatchIn(cleaned)) {
-                    return true
-                }
-            }
-            return false
+            return fastAffirmationRegex.matches(trimmed)
         }
     }
 
@@ -169,11 +148,11 @@ class HybridPipelineCoordinator(
 
         if (!activeJobCheck()) return Result.failure(Exception("Job cancelled"))
 
-        if (rawTranscript.isNullOrBlank()) {
+        val rawText = WhisperHallucinationFilter.stripTrailingHallucinations(rawTranscript ?: "")
+        if (rawText.isBlank()) {
             return Result.failure(Exception("未能辨識出清晰文字（雲端逾時且本機無可用音訊）"))
         }
 
-        val rawText = rawTranscript!!
         Log.i(TAG, "===> [Stage 1 Output]: ${rawText.length} chars (Offline: $usedOfflineStt)")
 
         // ==========================================
