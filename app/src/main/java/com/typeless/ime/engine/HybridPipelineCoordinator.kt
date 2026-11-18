@@ -192,10 +192,11 @@ class HybridPipelineCoordinator(
                     val finalText = if (polishedText.isNotBlank()) polishedText else rawText
                     val callsToday = settingsManager.dailyGeminiCalls
                     val lastToks = settingsManager.lastCallTokens
+                    val modelBadge = GeminiAudioClient.friendlyModelBadge(geminiClient.lastUsedModel)
                     return Result.success(
                         PipelineOutput(
                             text = finalText,
-                            statusBadge = "⚡ Groq + 🤖 Gemini (今日第 ${callsToday} 次 | ${lastToks} tok)",
+                            statusBadge = "⚡ Groq + 🤖 $modelBadge (今日第 ${callsToday} 次 | ${lastToks} tok)",
                             isOfflineFallback = false
                         )
                     )

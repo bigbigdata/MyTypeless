@@ -4,16 +4,17 @@ import android.util.Base64
 import android.util.Log
 import com.typeless.ime.BuildConfig
 import com.typeless.ime.engine.WhisperHallucinationFilter
+import java.io.File
+import java.io.FileInputStream
+import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.File
-import java.io.FileInputStream
-import java.io.IOException
-import java.util.concurrent.TimeUnit
 
 /**
  * GeminiAudioClient
@@ -22,7 +23,10 @@ import java.util.concurrent.TimeUnit
  * 1. [polishText]: Pure-text intelligent filler removal, homophone correction, and grammar polish.
  * 2. [transcribeAndPolish]: Multimodal direct audio transcription and polish (fallback mode).
  * 
- * Eliminates redundant ListModels/HEAD queries and aggressive retry loops, terminating immediately on 429 to safeguard quota.
+ * Implements a 3-Tier Free Tier Model Cascade:
+ *   Tier 1: gemini-3.5-flash-lite (500 RPD / 15 RPM, ~0.7s, high 3.5-gen accuracy, native 0 thinking tokens)
+ *   Tier 2: gemini-3-flash-preview (20 RPD / 5 RPM, high accuracy, thinkingBudget=0)
+ *   Tier 3: gemini-3.1-flash-lite (500 RPD / 15 RPM, separate 500/day pool, thinkingBudget=0)
  */
 class GeminiAudioClient(
     private val apiKeyProvider: () -> String?,
@@ -31,12 +35,32 @@ class GeminiAudioClient(
 
     companion object {
         private const val TAG = "GeminiAudioClient"
-        const val DEFAULT_MODEL = "gemini-3-flash-preview"
+        const val DEFAULT_MODEL = "gemini-3.5-flash-lite"
+        const val TIER_2_MODEL = "gemini-3-flash-preview"
         const val FALLBACK_LITE_MODEL = "gemini-3.1-flash-lite"
+        val MODEL_CASCADE = listOf(DEFAULT_MODEL, TIER_2_MODEL, FALLBACK_LITE_MODEL)
+
         internal const val MAX_INJECTED_VOCAB_TERMS = 30
         internal const val THINKING_BUDGET = 0
         internal const val MAX_OUTPUT_TOKENS = 1024
-        const val RATE_LIMIT_COOLDOWN_MS = 60_000L
+        const val RPM_COOLDOWN_MS = 60_000L // 60s cooldown on 1st 429 (per-minute RPM limit)
+        const val RPD_COOLDOWN_MS = 2 * 60 * 60 * 1000L // 2-hour cooldown on repeated 429 (daily RPD exhausted)
+        const val RATE_LIMIT_COOLDOWN_MS = RPM_COOLDOWN_MS
+
+        fun friendlyModelBadge(model: String): String {
+            return when {
+                model.contains("3.5-flash-lite") -> "3.5-Lite"
+                model.contains("3-flash") -> "3-Flash"
+                model.contains("3.1-flash-lite") -> "3.1-Lite"
+                else -> "Gemini"
+            }
+        }
+
+        internal fun requiresExplicitThinkingBudgetZero(model: String): Boolean {
+            // gemini-3.5-flash-lite natively runs with 0 thinking tokens and rejects thinkingBudget with HTTP 400.
+            // gemini-3-flash-preview and gemini-3.1-flash-lite require thinkingBudget = 0.
+            return !model.startsWith("gemini-3.5")
+        }
 
         private val fillerPrefixRegex = Regex("^[，,。？?\\s]*(呃|啊|那個|就是說|然後其實|嗯)[，,。？?\\s]*")
         private val inlineFillerRegex = Regex("([，,]\\s*(呃|啊|那個|就是說|嗯)\\s*)")
@@ -92,19 +116,43 @@ class GeminiAudioClient(
         .readTimeout(60, TimeUnit.SECONDS)
         .build()
 
+    private val modelCooldownUntilMs = ConcurrentHashMap<String, Long>()
+    private val modelStrikeCount = ConcurrentHashMap<String, Int>()
+
     @Volatile
-    private var rateLimitCooldownUntilMs: Long = 0L
+    var lastUsedModel: String = DEFAULT_MODEL
+        private set
+
+    fun isModelInCooldown(model: String): Boolean {
+        val until = modelCooldownUntilMs[model] ?: return false
+        return System.currentTimeMillis() < until
+    }
+
+    /**
+     * Records a 429 rate-limit strike for a specific model:
+     * - 1st strike (likely 1-minute RPM spike): 60s cooldown
+     * - 2nd+ strike (daily RPD quota exhausted): 2-hour cooldown so subsequent calls skip in 0ms
+     */
+    fun recordModelRateLimit(model: String, errorMsg: String = ""): Long {
+        val strikes = (modelStrikeCount[model] ?: 0) + 1
+        modelStrikeCount[model] = strikes
+        val isDailyQuotaExhausted = strikes >= 2 || errorMsg.contains("PerDay", ignoreCase = true) || errorMsg.contains("daily", ignoreCase = true)
+        val cooldownMs = if (isDailyQuotaExhausted) RPD_COOLDOWN_MS else RPM_COOLDOWN_MS
+        modelCooldownUntilMs[model] = System.currentTimeMillis() + cooldownMs
+        return cooldownMs
+    }
 
     val isInRateLimitCooldown: Boolean
-        get() = System.currentTimeMillis() < rateLimitCooldownUntilMs
+        get() = MODEL_CASCADE.all { isModelInCooldown(it) }
+
+    private fun orderedCandidateModels(preferredModel: String?): List<String> {
+        val primary = preferredModel?.takeIf { it.isNotBlank() } ?: DEFAULT_MODEL
+        return (listOf(primary) + MODEL_CASCADE).distinct()
+    }
 
     /**
      * [Text Polish Mode] (Primary recommended mode)
      * Passes the raw transcript from Groq or local STT to Gemini for filler word removal and grammar polish.
-     *
-     * @param rawText The raw transcript from STT.
-     * @param preferredModel Preferred Gemini model ID.
-     * @param knownVocabulary List of custom user vocabulary and technical terms for homophone correction.
      */
     fun polishText(
         rawText: String,
@@ -121,18 +169,16 @@ class GeminiAudioClient(
         }
 
         if (isInRateLimitCooldown) {
-            return Result.failure(RateLimitException("Gemini Free Tier 429 cooldown active"))
+            return Result.failure(RateLimitException("All Gemini Free Tier models are in cooldown"))
         }
 
-        val targetModel = preferredModel?.takeIf { it.isNotBlank() } ?: DEFAULT_MODEL
-        val jsonPayload = buildTextRequestJson(rawText, knownVocabulary)
-
         return try {
-            val polished = executeCallWithRetry(targetModel, apiKey, jsonPayload)
+            val polished = executeCascadeWithRetry(preferredModel, apiKey) { candidateModel ->
+                buildTextRequestJson(rawText, knownVocabulary, candidateModel)
+            }
             Result.success(polished)
         } catch (e: RateLimitException) {
-            rateLimitCooldownUntilMs = System.currentTimeMillis() + RATE_LIMIT_COOLDOWN_MS
-            Log.w(TAG, "Gemini quota exceeded (HTTP 429), activating 60s local fallback cooldown: ${e.message}")
+            Log.w(TAG, "All Gemini cascade models hit 429 rate limit, falling back to local formatter: ${e.message}")
             Result.failure(e)
         } catch (e: Exception) {
             Log.e(TAG, "Gemini text polishing exception", e)
@@ -157,12 +203,11 @@ class GeminiAudioClient(
             return Result.failure(IllegalArgumentException("Audio file is empty or recording duration was too short"))
         }
 
-        val targetModel = preferredModel?.takeIf { it.isNotBlank() } ?: DEFAULT_MODEL
-
         return try {
             val audioBase64 = encodeFileToBase64(audioFile)
-            val jsonPayload = buildAudioRequestJson(audioBase64, knownVocabulary)
-            val polished = executeCallWithRetry(targetModel, apiKey, jsonPayload)
+            val polished = executeCascadeWithRetry(preferredModel, apiKey) { candidateModel ->
+                buildAudioRequestJson(audioBase64, knownVocabulary, candidateModel)
+            }
             Result.success(polished)
         } catch (e: RateLimitException) {
             Log.w(TAG, "Gemini quota exceeded (HTTP 429), aborting call to protect quota: ${e.message}")
@@ -175,7 +220,7 @@ class GeminiAudioClient(
 
     /**
      * Live API Contract Verification:
-     * Sends a lightweight real POST request to verify that the configured API key and model
+     * Sends a lightweight real POST request to verify that the configured API key and model cascade
      * return HTTP 200 OK on Google's Generative Language API.
      */
     fun verifyApiKeyAndModel(preferredModel: String? = null): Result<String> {
@@ -183,41 +228,61 @@ class GeminiAudioClient(
         if (apiKey.isNullOrBlank()) {
             return Result.failure(IllegalStateException("Gemini API Key is not configured"))
         }
-        val targetModel = preferredModel?.takeIf { it.isNotBlank() } ?: DEFAULT_MODEL
-        val jsonPayload = buildTextRequestJson("測試連線", emptyList())
         return try {
-            val output = executeCallWithRetry(targetModel, apiKey, jsonPayload)
-            Result.success("HTTP 200 OK ($targetModel): $output")
+            val output = executeCascadeWithRetry(preferredModel, apiKey) { candidateModel ->
+                buildTextRequestJson("測試連線", emptyList(), candidateModel)
+            }
+            Result.success("HTTP 200 OK ($lastUsedModel): $output")
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
 
-    private fun executeCallWithRetry(model: String, apiKey: String, jsonPayload: String): String {
-        return try {
-            executeApiCall(model, apiKey, jsonPayload)
-        } catch (e: ServerUnavailableException) {
-            if (BuildConfig.DEBUG) {
-                Log.w(TAG, "Gemini server busy (503), waiting 1s before retrying once...")
+    private fun executeCascadeWithRetry(
+        preferredModel: String?,
+        apiKey: String,
+        payloadBuilder: (String) -> String
+    ): String {
+        val candidates = orderedCandidateModels(preferredModel)
+        var lastError: Exception? = null
+
+        for (candidateModel in candidates) {
+            if (isModelInCooldown(candidateModel)) {
+                if (BuildConfig.DEBUG) {
+                    Log.d(TAG, "Skipping model $candidateModel (currently in rate-limit cooldown)")
+                }
+                continue
             }
-            Thread.sleep(1000)
-            executeApiCall(model, apiKey, jsonPayload)
-        } catch (e: ModelNotFoundException) {
-            if (model != FALLBACK_LITE_MODEL) {
-                Log.w(TAG, "Model $model returned 404; automatically falling back to $FALLBACK_LITE_MODEL")
-                executeApiCall(FALLBACK_LITE_MODEL, apiKey, jsonPayload)
-            } else {
-                throw e
-            }
-        } catch (e: RateLimitException) {
-            // If primary model hits its Free Tier RPM/RPD limit, seamlessly try fallback model's separate quota pool
-            if (model != FALLBACK_LITE_MODEL) {
-                Log.i(TAG, "Primary model $model hit 429 rate limit; attempting seamless fallback to $FALLBACK_LITE_MODEL")
-                executeApiCall(FALLBACK_LITE_MODEL, apiKey, jsonPayload)
-            } else {
-                throw e
+
+            val jsonPayload = payloadBuilder(candidateModel)
+            try {
+                val result = try {
+                    executeApiCall(candidateModel, apiKey, jsonPayload)
+                } catch (e: ServerUnavailableException) {
+                    if (BuildConfig.DEBUG) {
+                        Log.w(TAG, "Gemini server busy (503) on $candidateModel, retrying once after 1s...")
+                    }
+                    Thread.sleep(1000)
+                    executeApiCall(candidateModel, apiKey, jsonPayload)
+                }
+                // Call succeeded on candidateModel! Reset its strike count and record active model.
+                modelStrikeCount[candidateModel] = 0
+                modelCooldownUntilMs.remove(candidateModel)
+                lastUsedModel = candidateModel
+                return result
+            } catch (e: RateLimitException) {
+                val cdMs = recordModelRateLimit(candidateModel, e.message ?: "")
+                Log.w(TAG, "Model $candidateModel hit HTTP 429 (cooldown ${cdMs / 1000}s); cascading to next model...")
+                lastError = e
+            } catch (e: ModelNotFoundException) {
+                // Model is unavailable/deprecated for this project -> cool down for 2 hours and cascade
+                modelCooldownUntilMs[candidateModel] = System.currentTimeMillis() + RPD_COOLDOWN_MS
+                Log.w(TAG, "Model $candidateModel returned 404; cascading to next model...")
+                lastError = e
             }
         }
+
+        throw (lastError ?: RateLimitException("All Gemini models in cascade are currently in cooldown"))
     }
 
     private fun executeApiCall(model: String, apiKey: String, jsonPayload: String): String {
@@ -308,7 +373,11 @@ class GeminiAudioClient(
 8. 【專屬詞庫同音校正】：[$vocabListStr]。若出現發音高度相似的同音誤字（如「底坡」➔「deploy」、「批啊」➔「PR」、「蓮發科」➔「聯發科」），請依語境還原為標準詞彙與大小寫。"""
     }
 
-    internal fun buildTextRequestJson(rawText: String, knownVocabulary: List<String>? = null): String {
+    internal fun buildTextRequestJson(
+        rawText: String,
+        knownVocabulary: List<String>? = null,
+        model: String = DEFAULT_MODEL
+    ): String {
         val root = JSONObject()
         val cleanedInput = preCleanRawText(rawText).ifBlank { rawText.trim() }
 
@@ -332,20 +401,28 @@ class GeminiAudioClient(
         contentsArray.put(contentObj)
         root.put("contents", contentsArray)
 
-        // Generation Config (strictly disable Thinking tokens to prevent $2.50/1M reasoning charges)
+        // Generation Config:
+        // - gemini-3.5-flash-lite natively runs with 0 thinking tokens and rejects thinkingBudget with HTTP 400
+        // - gemini-3-flash-preview and gemini-3.1-flash-lite require thinkingBudget = 0
         val genConfig = JSONObject().apply {
             put("temperature", 0.1)
             put("maxOutputTokens", MAX_OUTPUT_TOKENS)
-            put("thinkingConfig", JSONObject().apply {
-                put("thinkingBudget", THINKING_BUDGET)
-            })
+            if (requiresExplicitThinkingBudgetZero(model)) {
+                put("thinkingConfig", JSONObject().apply {
+                    put("thinkingBudget", THINKING_BUDGET)
+                })
+            }
         }
         root.put("generationConfig", genConfig)
 
         return root.toString()
     }
 
-    internal fun buildAudioRequestJson(audioBase64: String, knownVocabulary: List<String>? = null): String {
+    internal fun buildAudioRequestJson(
+        audioBase64: String,
+        knownVocabulary: List<String>? = null,
+        model: String = DEFAULT_MODEL
+    ): String {
         val root = JSONObject()
 
         val promptText = buildSystemPrompt(knownVocabulary)
@@ -376,9 +453,11 @@ class GeminiAudioClient(
         val genConfig = JSONObject().apply {
             put("temperature", 0.1)
             put("maxOutputTokens", 1024)
-            put("thinkingConfig", JSONObject().apply {
-                put("thinkingBudget", 0)
-            })
+            if (requiresExplicitThinkingBudgetZero(model)) {
+                put("thinkingConfig", JSONObject().apply {
+                    put("thinkingBudget", 0)
+                })
+            }
         }
         root.put("generationConfig", genConfig)
 

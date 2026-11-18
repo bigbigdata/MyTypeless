@@ -99,11 +99,56 @@ class LocalSemanticFormatterTest {
     }
 
     @Test
-    fun testDefaultModelIsGemini3FlashWithZeroThinking() {
-        assertEquals("gemini-3-flash-preview", SettingsManager.DEFAULT_MODEL)
-        assertEquals("gemini-3-flash-preview", GeminiAudioClient.DEFAULT_MODEL)
-        assertEquals("gemini-3.1-flash-lite", GeminiAudioClient.FALLBACK_LITE_MODEL)
-        assertEquals(0, GeminiAudioClient.THINKING_BUDGET)
+    fun testModelCascadeOrderAndSmartPayloadConfig() {
+        assertEquals("gemini-3.5-flash-lite", SettingsManager.DEFAULT_MODEL)
+        assertEquals("gemini-3.5-flash-lite", GeminiAudioClient.DEFAULT_MODEL)
+        assertEquals(
+            listOf("gemini-3.5-flash-lite", "gemini-3-flash-preview", "gemini-3.1-flash-lite"),
+            GeminiAudioClient.MODEL_CASCADE
+        )
+
+        val client = GeminiAudioClient(apiKeyProvider = { "test_key" })
+
+        // 1. gemini-3.5-flash-lite must OMIT thinkingConfig (native 0 thinking tokens; passing thinkingBudget causes HTTP 400)
+        val json35Lite = JSONObject(client.buildTextRequestJson("測試", emptyList(), "gemini-3.5-flash-lite"))
+        val gen35Lite = json35Lite.getJSONObject("generationConfig")
+        assertFalse("gemini-3.5-flash-lite must not include thinkingConfig", gen35Lite.has("thinkingConfig"))
+
+        // 2. gemini-3-flash-preview and gemini-3.1-flash-lite MUST include thinkingBudget = 0
+        for (m in listOf("gemini-3-flash-preview", "gemini-3.1-flash-lite")) {
+            val jsonOther = JSONObject(client.buildTextRequestJson("測試", emptyList(), m))
+            val genOther = jsonOther.getJSONObject("generationConfig")
+            assertEquals(0, genOther.getJSONObject("thinkingConfig").getInt("thinkingBudget"))
+        }
+    }
+
+    @Test
+    fun testPerModelProgressiveCooldownAndFriendlyBadge() {
+        val client = GeminiAudioClient(apiKeyProvider = { "test_key" })
+        assertEquals("3.5-Lite", GeminiAudioClient.friendlyModelBadge("gemini-3.5-flash-lite"))
+        assertEquals("3-Flash", GeminiAudioClient.friendlyModelBadge("gemini-3-flash-preview"))
+        assertEquals("3.1-Lite", GeminiAudioClient.friendlyModelBadge("gemini-3.1-flash-lite"))
+
+        // Initially no model is cooling down
+        assertFalse(client.isModelInCooldown("gemini-3.5-flash-lite"))
+        assertFalse(client.isInRateLimitCooldown)
+
+        // Strike 1 on 3.5-flash-lite -> 60s RPM cooldown on 3.5-flash-lite only; other models remain available!
+        val cd1 = client.recordModelRateLimit("gemini-3.5-flash-lite")
+        assertEquals(GeminiAudioClient.RPM_COOLDOWN_MS, cd1)
+        assertTrue(client.isModelInCooldown("gemini-3.5-flash-lite"))
+        assertFalse(client.isModelInCooldown("gemini-3-flash-preview"))
+        assertFalse(client.isModelInCooldown("gemini-3.1-flash-lite"))
+        assertFalse("Global cooldown must remain false while backup models are available", client.isInRateLimitCooldown)
+
+        // Strike 2 on 3.5-flash-lite -> escalates to 2-hour RPD cooldown
+        val cd2 = client.recordModelRateLimit("gemini-3.5-flash-lite")
+        assertEquals(GeminiAudioClient.RPD_COOLDOWN_MS, cd2)
+
+        // Only when ALL 3 models in cascade are in cooldown should isInRateLimitCooldown be true
+        client.recordModelRateLimit("gemini-3-flash-preview")
+        client.recordModelRateLimit("gemini-3.1-flash-lite")
+        assertTrue(client.isInRateLimitCooldown)
     }
 
     @Test
@@ -121,10 +166,10 @@ class LocalSemanticFormatterTest {
     fun testGeminiRequestPayloadDisablesThinkingAndIncludesFullHomophoneRules() {
         val client = GeminiAudioClient(apiKeyProvider = { "test_key" })
         val largeVocab = (1..60).map { "Term_$it" }
-        val jsonStr = client.buildTextRequestJson("那個 呃 請幫我測試一下這段文字，謝謝大家。", largeVocab)
+        val jsonStr = client.buildTextRequestJson("那個 呃 請幫我測試一下這段文字，謝謝大家。", largeVocab, "gemini-3-flash-preview")
         val root = JSONObject(jsonStr)
 
-        // 1. Verify thinkingBudget is strictly 0
+        // 1. Verify thinkingBudget is strictly 0 for 3-flash-preview / 3.1-flash-lite
         val genConfig = root.getJSONObject("generationConfig")
         assertTrue("maxOutputTokens must be <= 1024", genConfig.getInt("maxOutputTokens") <= 1024)
         val thinkingConfig = genConfig.getJSONObject("thinkingConfig")
@@ -226,7 +271,7 @@ class LocalSemanticFormatterTest {
     fun testAudioRequestPayloadDisablesThinkingAndCapsVocab() {
         val client = GeminiAudioClient(apiKeyProvider = { "test_key" })
         val largeVocab = (1..60).map { "AudioTerm_$it" }
-        val jsonStr = client.buildAudioRequestJson("ZHVtbXlJbmxpbmVEYXRh", largeVocab)
+        val jsonStr = client.buildAudioRequestJson("ZHVtbXlJbmxpbmVEYXRh", largeVocab, "gemini-3-flash-preview")
         val root = JSONObject(jsonStr)
 
         val genConfig = root.getJSONObject("generationConfig")
@@ -261,10 +306,10 @@ class LocalSemanticFormatterTest {
     @Test
     fun testLiveGeminiEndpointContractNeverReturns404() {
         val client = GeminiAudioClient(apiKeyProvider = { "contract_probe_key" })
-        val payload = client.buildTextRequestJson("測試連線", emptyList())
         val http = OkHttpClient()
 
-        for (model in listOf(GeminiAudioClient.DEFAULT_MODEL, GeminiAudioClient.FALLBACK_LITE_MODEL)) {
+        for (model in GeminiAudioClient.MODEL_CASCADE) {
+            val payload = client.buildTextRequestJson("測試連線", emptyList(), model)
             val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent"
             val req = Request.Builder()
                 .url(url)
@@ -273,8 +318,6 @@ class LocalSemanticFormatterTest {
                 .build()
 
             http.newCall(req).execute().use { resp ->
-                // A 404 or 405 means the URL path, HTTP verb, or model ID does not exist on Google's server.
-                // A 400 (API_KEY_INVALID) or 200 proves the endpoint + HTTP method + model route is 100% valid!
                 assertNotEquals("Model endpoint $url returned 404 Not Found!", 404, resp.code)
                 assertNotEquals("Model endpoint $url returned 405 Method Not Allowed!", 405, resp.code)
             }

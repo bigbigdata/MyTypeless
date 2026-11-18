@@ -27,7 +27,7 @@ class SettingsManager(context: Context) {
         private const val KEY_DAILY_GEMINI_CALLS = "gemini_daily_calls"
         private const val KEY_DAILY_GEMINI_TOKENS = "gemini_daily_tokens"
         private const val KEY_LAST_CALL_TOKENS = "gemini_last_call_tokens"
-        const val DEFAULT_MODEL = "gemini-3-flash-preview"
+        const val DEFAULT_MODEL = "gemini-3.5-flash-lite"
 
         private fun todayString(): String {
             return SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
@@ -55,7 +55,12 @@ class SettingsManager(context: Context) {
     var model: String
         get() {
             val saved = prefs.getString(KEY_GEMINI_MODEL, DEFAULT_MODEL)?.trim()
-            return if (saved.isNullOrEmpty() || saved == "gemini-2.5-flash" || saved == "gemini-2.5-flash-lite") {
+            return if (
+                saved.isNullOrEmpty() ||
+                saved == "gemini-2.5-flash" ||
+                saved == "gemini-2.5-flash-lite" ||
+                saved == "gemini-3-flash-preview"
+            ) {
                 DEFAULT_MODEL
             } else {
                 saved
