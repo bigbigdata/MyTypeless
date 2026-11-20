@@ -7,6 +7,7 @@ import com.typeless.ime.engine.WhisperHallucinationFilter
 import java.io.File
 import java.io.FileInputStream
 import java.io.IOException
+import java.io.InterruptedIOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import okhttp3.MediaType.Companion.toMediaType
@@ -44,6 +45,7 @@ class GeminiAudioClient(
         internal const val THINKING_BUDGET = 0
         internal const val MAX_OUTPUT_TOKENS = 1024
         const val RPM_COOLDOWN_MS = 60_000L // 60s cooldown on 1st 429 (per-minute RPM limit)
+        const val TRANSIENT_COOLDOWN_MS = 60_000L // 60s cooldown on HTTP 503 or single-model timeout
         const val RPD_COOLDOWN_MS = 2 * 60 * 60 * 1000L // 2-hour cooldown on repeated 429 (daily RPD exhausted)
         const val RATE_LIMIT_COOLDOWN_MS = RPM_COOLDOWN_MS
 
@@ -111,10 +113,21 @@ class GeminiAudioClient(
     }
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .writeTimeout(60, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
+        .connectTimeout(6, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(8, TimeUnit.SECONDS)
+        .callTimeout(10, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
+
+    // Shares the same connection pool as [client] with longer timeouts for multimodal audio uploads.
+    private val audioClient = client.newBuilder()
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .callTimeout(40, TimeUnit.SECONDS)
+        .build()
+
+    internal var apiCallerOverride: ((model: String, apiKey: String, jsonPayload: String, useAudioTimeouts: Boolean) -> String)? = null
 
     private val modelCooldownUntilMs = ConcurrentHashMap<String, Long>()
     private val modelStrikeCount = ConcurrentHashMap<String, Int>()
@@ -123,9 +136,34 @@ class GeminiAudioClient(
     var lastUsedModel: String = DEFAULT_MODEL
         private set
 
+    /**
+     * Evicts idle pooled TCP connections (e.g., after waking from Doze or switching networks)
+     * so subsequent requests never stall on a stale half-open socket.
+     */
+    fun evictIdleConnections() {
+        client.connectionPool.evictAll()
+    }
+
+    /**
+     * Clears all per-model cooldowns and strike counters (e.g., after a manual connection check succeeds).
+     */
+    fun clearCooldowns() {
+        modelCooldownUntilMs.clear()
+        modelStrikeCount.clear()
+    }
+
     fun isModelInCooldown(model: String): Boolean {
         val until = modelCooldownUntilMs[model] ?: return false
         return System.currentTimeMillis() < until
+    }
+
+    /**
+     * Records a temporary congestion/timeout failure (HTTP 503 or socket timeout) for a model.
+     * Applies a short 60s cooldown WITHOUT escalating to the 2-hour daily quota cooldown.
+     */
+    fun recordModelTransientFailure(model: String): Long {
+        modelCooldownUntilMs[model] = System.currentTimeMillis() + TRANSIENT_COOLDOWN_MS
+        return TRANSIENT_COOLDOWN_MS
     }
 
     /**
@@ -205,7 +243,7 @@ class GeminiAudioClient(
 
         return try {
             val audioBase64 = encodeFileToBase64(audioFile)
-            val polished = executeCascadeWithRetry(preferredModel, apiKey) { candidateModel ->
+            val polished = executeCascadeWithRetry(preferredModel, apiKey, useAudioTimeouts = true) { candidateModel ->
                 buildAudioRequestJson(audioBase64, knownVocabulary, candidateModel)
             }
             Result.success(polished)
@@ -241,6 +279,7 @@ class GeminiAudioClient(
     private fun executeCascadeWithRetry(
         preferredModel: String?,
         apiKey: String,
+        useAudioTimeouts: Boolean = false,
         payloadBuilder: (String) -> String
     ): String {
         val candidates = orderedCandidateModels(preferredModel)
@@ -249,22 +288,15 @@ class GeminiAudioClient(
         for (candidateModel in candidates) {
             if (isModelInCooldown(candidateModel)) {
                 if (BuildConfig.DEBUG) {
-                    Log.d(TAG, "Skipping model $candidateModel (currently in rate-limit cooldown)")
+                    Log.d(TAG, "Skipping model $candidateModel (currently in cooldown)")
                 }
                 continue
             }
 
             val jsonPayload = payloadBuilder(candidateModel)
             try {
-                val result = try {
-                    executeApiCall(candidateModel, apiKey, jsonPayload)
-                } catch (e: ServerUnavailableException) {
-                    if (BuildConfig.DEBUG) {
-                        Log.w(TAG, "Gemini server busy (503) on $candidateModel, retrying once after 1s...")
-                    }
-                    Thread.sleep(1000)
-                    executeApiCall(candidateModel, apiKey, jsonPayload)
-                }
+                val result = apiCallerOverride?.invoke(candidateModel, apiKey, jsonPayload, useAudioTimeouts)
+                    ?: executeApiCall(candidateModel, apiKey, jsonPayload, useAudioTimeouts)
                 // Call succeeded on candidateModel! Reset its strike count and record active model.
                 modelStrikeCount[candidateModel] = 0
                 modelCooldownUntilMs.remove(candidateModel)
@@ -273,6 +305,17 @@ class GeminiAudioClient(
             } catch (e: RateLimitException) {
                 val cdMs = recordModelRateLimit(candidateModel, e.message ?: "")
                 Log.w(TAG, "Model $candidateModel hit HTTP 429 (cooldown ${cdMs / 1000}s); cascading to next model...")
+                lastError = e
+            } catch (e: ServerUnavailableException) {
+                val cdMs = recordModelTransientFailure(candidateModel)
+                Log.w(TAG, "Model $candidateModel busy with HTTP 503 (cooldown ${cdMs / 1000}s); cascading to next model...")
+                lastError = e
+            } catch (e: InterruptedIOException) {
+                if (Thread.currentThread().isInterrupted) {
+                    throw e
+                }
+                val cdMs = recordModelTransientFailure(candidateModel)
+                Log.w(TAG, "Model $candidateModel timed out (cooldown ${cdMs / 1000}s); cascading to next model...")
                 lastError = e
             } catch (e: ModelNotFoundException) {
                 // Model is unavailable/deprecated for this project -> cool down for 2 hours and cascade
@@ -285,7 +328,12 @@ class GeminiAudioClient(
         throw (lastError ?: RateLimitException("All Gemini models in cascade are currently in cooldown"))
     }
 
-    private fun executeApiCall(model: String, apiKey: String, jsonPayload: String): String {
+    private fun executeApiCall(
+        model: String,
+        apiKey: String,
+        jsonPayload: String,
+        useAudioTimeouts: Boolean = false
+    ): String {
         val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent"
         val mediaType = "application/json; charset=utf-8".toMediaType()
         val requestBody = jsonPayload.toRequestBody(mediaType)
@@ -296,7 +344,8 @@ class GeminiAudioClient(
             .post(requestBody)
             .build()
 
-        client.newCall(request).execute().use { response ->
+        val httpClient = if (useAudioTimeouts) audioClient else client
+        httpClient.newCall(request).execute().use { response ->
             val responseBody = response.body?.string() ?: ""
 
             if (!response.isSuccessful) {

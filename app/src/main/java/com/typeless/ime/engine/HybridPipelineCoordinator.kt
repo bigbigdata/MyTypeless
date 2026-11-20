@@ -43,7 +43,7 @@ class HybridPipelineCoordinator(
     companion object {
         private const val TAG = "HybridCoordinator"
         private const val CLOUD_STT_TIMEOUT_MS = 45_000L  // 45s for audio upload & Groq Whisper transcription of long audio
-        private const val CLOUD_POLISH_TIMEOUT_MS = 15_000L // 15s for Gemini text polishing
+        private const val CLOUD_POLISH_TIMEOUT_MS = 18_000L // 18s total budget for Gemini cascade (10s max per tier + instant failover)
         const val FAST_PATH_MAX_CHARS = 4
 
         private val fastAffirmationRegex = Regex(
@@ -116,11 +116,11 @@ class HybridPipelineCoordinator(
         // ==========================================
         if (isOnline && hasCloudKeys) {
             onStatusUpdate("⚡ Groq 轉錄中...")
+            val future = executor.submit(Callable {
+                cloudSttEngine.transcribe(audioFile, dynamicWhisperPrompt)
+            })
             try {
                 // Execute cloud STT with timeout protection
-                val future = executor.submit(Callable {
-                    cloudSttEngine.transcribe(audioFile, dynamicWhisperPrompt)
-                })
                 val result = future.get(CLOUD_STT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
                 result.onSuccess { text ->
                     if (text.isNotBlank()) rawTranscript = text
@@ -128,8 +128,10 @@ class HybridPipelineCoordinator(
                     if (BuildConfig.DEBUG) Log.w(TAG, "Cloud Groq STT failed: ${err.message}, attempting fallback")
                 }
             } catch (e: TimeoutException) {
+                future.cancel(true)
                 if (BuildConfig.DEBUG) Log.w(TAG, "Cloud Groq STT timed out (> ${CLOUD_STT_TIMEOUT_MS}ms), activating circuit breaker")
             } catch (e: Exception) {
+                future.cancel(true)
                 if (BuildConfig.DEBUG) Log.w(TAG, "Cloud Groq STT exception: ${e.message}")
             }
         }
@@ -180,10 +182,10 @@ class HybridPipelineCoordinator(
         // ==========================================
         if (isOnline && settingsManager.hasApiKey && !usedOfflineStt && !geminiClient.isInRateLimitCooldown) {
             onStatusUpdate("🤖 Gemini 長篇潤飾中...")
+            val future = executor.submit(Callable {
+                cloudPolishingEngine.polish(rawText, knownVocabulary)
+            })
             try {
-                val future = executor.submit(Callable {
-                    cloudPolishingEngine.polish(rawText, knownVocabulary)
-                })
                 val polishResult = future.get(CLOUD_POLISH_TIMEOUT_MS, TimeUnit.MILLISECONDS)
                 if (!activeJobCheck()) return Result.failure(Exception("Job cancelled"))
 
@@ -201,8 +203,12 @@ class HybridPipelineCoordinator(
                         )
                     )
                 }
+            } catch (e: TimeoutException) {
+                future.cancel(true)
+                if (BuildConfig.DEBUG) Log.w(TAG, "Cloud Gemini polish timed out (> ${CLOUD_POLISH_TIMEOUT_MS}ms), falling back to local adaptive engine")
             } catch (e: Exception) {
-                if (BuildConfig.DEBUG) Log.w(TAG, "Cloud Gemini polish failed or timed out: ${e.message}, falling back to local adaptive engine")
+                future.cancel(true)
+                if (BuildConfig.DEBUG) Log.w(TAG, "Cloud Gemini polish failed: ${e.message}, falling back to local adaptive engine")
             }
         }
 

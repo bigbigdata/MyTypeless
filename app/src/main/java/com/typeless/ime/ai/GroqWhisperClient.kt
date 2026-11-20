@@ -29,10 +29,19 @@ class GroqWhisperClient(private val apiKeyProvider: () -> String?) {
     }
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .writeTimeout(60, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(35, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
+
+    /**
+     * Evicts idle pooled TCP connections (e.g., after waking from Doze or switching Wi-Fi/cellular)
+     * so the next upload never stalls on a stale half-open socket.
+     */
+    fun evictIdleConnections() {
+        client.connectionPool.evictAll()
+    }
 
     /**
      * Transcribes an audio file into raw text (supports M4A/AAC and WAV).

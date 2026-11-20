@@ -84,6 +84,7 @@ class SettingsActivity : AppCompatActivity() {
                         btnSave.isEnabled = true
                         btnSave.text = "儲存設定"
                         verifyResult.onSuccess { msg ->
+                            notifyImeConnectionVerified()
                             tvVocabStats.text = "${baseStatsText()}\n✅ Gemini API 連線驗證成功 ($msg)"
                             Toast.makeText(this@SettingsActivity, "✅ Gemini API 連線驗證成功 ($msg)", Toast.LENGTH_LONG).show()
                             Handler(Looper.getMainLooper()).postDelayed({
@@ -128,6 +129,7 @@ class SettingsActivity : AppCompatActivity() {
             Handler(Looper.getMainLooper()).post {
                 if (isFinishing || isDestroyed) return@post
                 result.onSuccess { msg ->
+                    notifyImeConnectionVerified()
                     tvVocabStats.text = "${baseStatsText()}\n✅ Gemini API 連線驗證成功 ($msg)"
                     Toast.makeText(this@SettingsActivity, "✅ Gemini API 連線驗證成功 (HTTP 200 OK)", Toast.LENGTH_LONG).show()
                 }.onFailure { err ->
@@ -135,5 +137,12 @@ class SettingsActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    private fun notifyImeConnectionVerified() {
+        val intent = Intent(TypelessInputMethodService.ACTION_CONNECTION_VERIFIED).apply {
+            setPackage(packageName)
+        }
+        sendBroadcast(intent)
     }
 }

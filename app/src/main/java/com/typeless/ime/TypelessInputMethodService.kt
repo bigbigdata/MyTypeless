@@ -65,6 +65,7 @@ class TypelessInputMethodService : InputMethodService() {
         private const val NOTIFICATION_ID = 1001
         private const val ACTION_STOP_AND_SUBMIT = "com.typeless.ime.ACTION_STOP_AND_SUBMIT"
         private const val ACTION_ABORT_RECORDING = "com.typeless.ime.ACTION_ABORT_RECORDING"
+        const val ACTION_CONNECTION_VERIFIED = "com.typeless.ime.ACTION_CONNECTION_VERIFIED"
     }
 
     private lateinit var audioRecorderManager: AudioRecorderManager
@@ -78,6 +79,7 @@ class TypelessInputMethodService : InputMethodService() {
     private lateinit var localPolishingEngine: LocalAdaptivePolishingEngine
 
     private var isRecording = false
+    private var isCurrentRecordingOnDevice = false
     private var isProcessing = false
     private var isSlidingToCancel = false
     private var touchDownTime = 0L
@@ -140,6 +142,14 @@ class TypelessInputMethodService : InputMethodService() {
                         abortProcessingFlow()
                     }
                 }
+                ACTION_CONNECTION_VERIFIED -> {
+                    Log.i(TAG, "Manual connection verified in Settings; refreshing IME network & clearing cooldowns")
+                    geminiClient.clearCooldowns()
+                    geminiClient.evictIdleConnections()
+                    groqClient.evictIdleConnections()
+                    networkMonitor.refreshConnectivity()
+                    mainHandler.post { updateModeToggleButtonUi() }
+                }
             }
         }
     }
@@ -155,6 +165,18 @@ class TypelessInputMethodService : InputMethodService() {
             onUsageRecorded = { tokens -> settingsManager.recordGeminiUsage(tokens) }
         )
         networkMonitor = NetworkStateMonitor(this)
+        networkMonitor.addListener { online ->
+            if (online) {
+                groqClient.evictIdleConnections()
+                geminiClient.evictIdleConnections()
+            }
+            mainHandler.post { updateModeToggleButtonUi() }
+        }
+        networkMonitor.addNetworkSwitchListener {
+            groqClient.evictIdleConnections()
+            geminiClient.evictIdleConnections()
+            mainHandler.post { updateModeToggleButtonUi() }
+        }
         pixelSttManager = PixelStreamingSttManager(this)
         localPolishingEngine = LocalAdaptivePolishingEngine(
             context = this
@@ -171,6 +193,7 @@ class TypelessInputMethodService : InputMethodService() {
         val filter = IntentFilter().apply {
             addAction(ACTION_STOP_AND_SUBMIT)
             addAction(ACTION_ABORT_RECORDING)
+            addAction(ACTION_CONNECTION_VERIFIED)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(recordingControlReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -287,6 +310,8 @@ class TypelessInputMethodService : InputMethodService() {
     override fun onStartInputView(info: android.view.inputmethod.EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
         lastEditorInfo = info
+        networkMonitor.refreshConnectivity()
+        updateModeToggleButtonUi()
         updateActionButtonState(info)
 
         if (isRecording) {
@@ -389,7 +414,7 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     private fun syncRecordingUiState() {
-        val isDeviceMode = settingsManager.isForcedOfflineMode || !networkMonitor.isOnline
+        val isDeviceMode = isCurrentRecordingOnDevice
         tvStatus?.text = if (isDeviceMode) "🎙️ 聆聽中... 說完整句後請點擊送出" else getString(R.string.status_recording)
         pbAudioLevel?.visibility = View.VISIBLE
         btnRecord?.isEnabled = true
@@ -402,7 +427,7 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     private fun syncProcessingUiState() {
-        val isDeviceMode = settingsManager.isForcedOfflineMode || !networkMonitor.isOnline
+        val isDeviceMode = isCurrentRecordingOnDevice
         tvStatus?.text = if (isDeviceMode) "⏳ Pixel 處理中..." else "⏳ 處理中..."
         pbAudioLevel?.visibility = View.INVISIBLE
         btnRecord?.isEnabled = false
@@ -556,7 +581,9 @@ class TypelessInputMethodService : InputMethodService() {
         if (isProcessing) return
 
         if (!isRecording) {
-            val isDeviceMode = settingsManager.isForcedOfflineMode || !networkMonitor.isOnline
+            val isOnlineNow = networkMonitor.refreshConnectivity()
+            updateModeToggleButtonUi()
+            val isDeviceMode = settingsManager.isForcedOfflineMode || !isOnlineNow
             if (!isDeviceMode && !settingsManager.hasGroqApiKey && !settingsManager.hasApiKey) {
                 Toast.makeText(this, "請先在設定中輸入 Groq 或 Gemini Key", Toast.LENGTH_SHORT).show()
                 openSettingsActivity()
@@ -567,6 +594,7 @@ class TypelessInputMethodService : InputMethodService() {
 
             PermissionActivity.requestRecordAudio(this) { granted ->
                 if (granted) {
+                    isCurrentRecordingOnDevice = isDeviceMode
                     if (isDeviceMode) {
                         startOnDeviceRecordingFlow()
                     } else {
@@ -629,8 +657,7 @@ class TypelessInputMethodService : InputMethodService() {
         setKeepScreenOn(false)
         dismissRecordingNotification()
 
-        val isDeviceMode = settingsManager.isForcedOfflineMode || !networkMonitor.isOnline
-        if (isDeviceMode) {
+        if (isCurrentRecordingOnDevice) {
             stopOnDeviceRecordingFlow()
             return
         }
@@ -767,12 +794,19 @@ class TypelessInputMethodService : InputMethodService() {
     }
 
     private fun updateModeToggleButtonUi() {
-        if (settingsManager.isForcedOfflineMode) {
-            btnModeToggle?.text = "📱 端側"
-            btnModeToggle?.setTextColor(ContextCompat.getColor(this, R.color.ime_recording))
-        } else {
-            btnModeToggle?.text = "☁️ 雲端"
-            btnModeToggle?.setTextColor(ContextCompat.getColor(this, R.color.ime_text_secondary))
+        when {
+            settingsManager.isForcedOfflineMode -> {
+                btnModeToggle?.text = "📱 端側"
+                btnModeToggle?.setTextColor(ContextCompat.getColor(this, R.color.ime_recording))
+            }
+            !networkMonitor.isOnline -> {
+                btnModeToggle?.text = "📴 離線"
+                btnModeToggle?.setTextColor(ContextCompat.getColor(this, R.color.ime_text_secondary))
+            }
+            else -> {
+                btnModeToggle?.text = "☁️ 雲端"
+                btnModeToggle?.setTextColor(ContextCompat.getColor(this, R.color.ime_text_secondary))
+            }
         }
     }
 
